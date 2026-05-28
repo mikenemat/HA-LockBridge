@@ -88,13 +88,17 @@ echo "→ Signing with: $DEV_ID_CERT"
 # that are scoped to the HALockBridge target only, so SwiftPM dependencies
 # (swift-nio etc.) keep their default of no provisioning profile and the
 # build doesn't fail with "X does not support provisioning profiles."
+# Pipe the full xcodebuild output through to the caller — previously this
+# was `| tail -10`, which routinely swallowed the actual error context on
+# failure. With `set -o pipefail` already on, the pipeline's exit code
+# is xcodebuild's exit code regardless of the tee.
 xcodebuild \
     -project HALockBridge.xcodeproj \
     -scheme HALockBridge \
     -configuration Distribution \
     -destination 'platform=macOS,variant=Mac Catalyst' \
     -derivedDataPath build \
-    build | tail -10
+    build 2>&1 | tee build/xcodebuild.log
 
 APP="build/Build/Products/Distribution-maccatalyst/HA-LockBridge.app"
 [ -d "$APP" ] || { echo "Build produced no .app at $APP"; exit 1; }

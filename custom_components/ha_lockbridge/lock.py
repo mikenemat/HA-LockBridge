@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .client import LockBridgeClient
-from .const import CONF_ENABLED_IDS, DOMAIN
+from .const import DOMAIN
 from .entity import LockBridgeBaseEntity, enabled_accessories
 
 _LOGGER = logging.getLogger(__name__)

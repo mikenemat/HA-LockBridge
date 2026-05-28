@@ -4,7 +4,7 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
-## [0.4.4] — 2026-05-28
+## [0.4.5] — 2026-05-28
 
 ### Changed
 - **Auto-start at login moved into the app.** The previous shell-script

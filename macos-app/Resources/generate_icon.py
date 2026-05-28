@@ -11,11 +11,9 @@ The design is intentionally simple — replace with real artwork when you have i
 """
 from __future__ import annotations
 
-import math
-import os
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw
 
 
 HERE = Path(__file__).resolve().parent
