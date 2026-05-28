@@ -44,7 +44,7 @@ final class BonjourService: NSObject, NetServiceDelegate {
         let txtData = NetService.data(fromTXTRecord: [
             "uuid": Data(instanceID.utf8),
             "name": Data(name.utf8),
-            "version": Data("0.4.1".utf8),
+            "version": Data("0.4.2".utf8),
             "api": Data("1".utf8),
         ])
         svc.setTXTRecord(txtData)

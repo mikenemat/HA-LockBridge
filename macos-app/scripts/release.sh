@@ -82,15 +82,27 @@ DEV_ID_CERT="${DEVELOPER_ID_CERT_NAME:-$(security find-identity -p codesigning -
 }
 echo "→ Signing with: $DEV_ID_CERT"
 
+XCODE_SIGN_ARGS=(
+    CODE_SIGN_STYLE=Manual
+    "CODE_SIGN_IDENTITY=$DEV_ID_CERT"
+)
+# Mac Catalyst apps with restricted entitlements (HomeKit) require a
+# Developer ID Provisioning Profile in addition to the signing cert. CI
+# installs the profile and exports its name via $PROVISIONING_PROFILE_SPECIFIER;
+# local maintainer runs can override the same env var, or let xcodebuild
+# fall back to its own auto-discovery if the profile is already in
+# ~/Library/Developer/Xcode/UserData/Provisioning Profiles/.
+if [ -n "${PROVISIONING_PROFILE_SPECIFIER:-}" ]; then
+    XCODE_SIGN_ARGS+=("PROVISIONING_PROFILE_SPECIFIER=$PROVISIONING_PROFILE_SPECIFIER")
+fi
+
 xcodebuild \
     -project HALockBridge.xcodeproj \
     -scheme HALockBridge \
     -configuration Release \
     -destination 'platform=macOS,variant=Mac Catalyst' \
     -derivedDataPath build \
-    -allowProvisioningUpdates \
-    CODE_SIGN_STYLE=Manual \
-    "CODE_SIGN_IDENTITY=$DEV_ID_CERT" \
+    "${XCODE_SIGN_ARGS[@]}" \
     build | tail -10
 
 APP="build/Build/Products/Release-maccatalyst/HA-LockBridge.app"
