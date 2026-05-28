@@ -222,7 +222,7 @@ enum WSEnvelope {
             return try? JSONSerialization.data(withJSONObject: [
                 "type": "hello",
                 "server": "ha-lockbridge",
-                "version": "0.4.3"
+                "version": "0.4.4"
             ], options: [.sortedKeys])
         case .snapshot(let states):
             let body: [String: Any] = [
@@ -462,7 +462,7 @@ final class HTTPRequestHandler: ChannelInboundHandler, RemovableChannelHandler {
             respondJSON(context: context, status: .ok, body: [
                 "instance_id": store.instanceID,
                 "name": "HA-LockBridge",
-                "version": "0.4.3"
+                "version": "0.4.4"
             ])
             return
         }

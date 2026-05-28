@@ -82,30 +82,21 @@ DEV_ID_CERT="${DEVELOPER_ID_CERT_NAME:-$(security find-identity -p codesigning -
 }
 echo "→ Signing with: $DEV_ID_CERT"
 
-XCODE_SIGN_ARGS=(
-    CODE_SIGN_STYLE=Manual
-    "CODE_SIGN_IDENTITY=$DEV_ID_CERT"
-)
-# Mac Catalyst apps with restricted entitlements (HomeKit) require a
-# Developer ID Provisioning Profile in addition to the signing cert. CI
-# installs the profile and exports its name via $PROVISIONING_PROFILE_SPECIFIER;
-# local maintainer runs can override the same env var, or let xcodebuild
-# fall back to its own auto-discovery if the profile is already in
-# ~/Library/Developer/Xcode/UserData/Provisioning Profiles/.
-if [ -n "${PROVISIONING_PROFILE_SPECIFIER:-}" ]; then
-    XCODE_SIGN_ARGS+=("PROVISIONING_PROFILE_SPECIFIER=$PROVISIONING_PROFILE_SPECIFIER")
-fi
-
+# Use the Distribution config (defined in project.yml). It's a Release-based
+# config that additionally pins Manual signing + the Developer ID cert + the
+# pre-installed "HA-LockBridge Developer ID" provisioning profile — settings
+# that are scoped to the HALockBridge target only, so SwiftPM dependencies
+# (swift-nio etc.) keep their default of no provisioning profile and the
+# build doesn't fail with "X does not support provisioning profiles."
 xcodebuild \
     -project HALockBridge.xcodeproj \
     -scheme HALockBridge \
-    -configuration Release \
+    -configuration Distribution \
     -destination 'platform=macOS,variant=Mac Catalyst' \
     -derivedDataPath build \
-    "${XCODE_SIGN_ARGS[@]}" \
     build | tail -10
 
-APP="build/Build/Products/Release-maccatalyst/HA-LockBridge.app"
+APP="build/Build/Products/Distribution-maccatalyst/HA-LockBridge.app"
 [ -d "$APP" ] || { echo "Build produced no .app at $APP"; exit 1; }
 echo "→ Built: $APP"
 
