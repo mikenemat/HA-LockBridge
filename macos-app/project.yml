@@ -62,7 +62,13 @@ targets:
       base:
         PRODUCT_NAME: HA-LockBridge
         # Resolved at build time from BUNDLE_ID_PREFIX in DevelopmentTeam.xcconfig.
-        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).HALockBridge
+        # NB: suffix is "HALockBridgeApp", not "HALockBridge" — the original
+        # identifier is permanently claimed by the maintainer's free-tier
+        # Personal Team from earlier local builds, and Apple doesn't release
+        # Personal Team App IDs back to the pool. PRODUCT_NAME stays
+        # HA-LockBridge so the on-disk .app and the user-facing name are
+        # unaffected.
+        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).HALockBridgeApp
         MARKETING_VERSION: "0.4.1"
         CURRENT_PROJECT_VERSION: "1"
         SUPPORTS_MACCATALYST: YES
