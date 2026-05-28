@@ -1,0 +1,8 @@
+// Copy this file to DevelopmentTeam.xcconfig and replace the value with your
+// own Apple Developer Team ID. You can find it in Xcode under Settings →
+// Accounts → (your Apple ID) → Manage Certificates, or in the Apple Developer
+// portal at developer.apple.com/account.
+//
+// Free "Personal Team" accounts work fine for personal/local use; the cert
+// rotates every 7 days, so the bridge needs a rebuild weekly.
+DEVELOPMENT_TEAM = YOUR_TEAM_ID_HERE

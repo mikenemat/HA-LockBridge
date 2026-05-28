@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ha-integration:
+    name: HA integration — syntax & schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: py_compile every .py
+        working-directory: custom_components/ha_lockbridge
+        run: |
+          for f in *.py; do
+            python -m py_compile "$f"
+          done
+      - name: Validate JSON files
+        working-directory: custom_components/ha_lockbridge
+        run: |
+          for f in manifest.json strings.json translations/*.json; do
+            python -c "import json; json.load(open('$f'))"
+          done
+      - name: Validate root JSON files
+        run: |
+          python -c "import json; json.load(open('hacs.json'))"
+      - name: Run sanity tests
+        run: |
+          python -m pytest tests/ -v || python -c "
+          import sys; sys.path.insert(0, 'tests'); import test_partition as t
+          for n in dir(t):
+              if n.startswith('test_'):
+                  getattr(t, n)(); print(f'  ok {n}')
+          "
+
+  bridge-build:
+    name: Bridge — Xcode build (no signing)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install xcodegen
+        run: brew install xcodegen
+      - name: Generate project
+        working-directory: macos-app
+        run: |
+          # CI doesn't have your team — stub the xcconfig with empty value
+          cp DevelopmentTeam.xcconfig.example DevelopmentTeam.xcconfig
+          sed -i '' 's/YOUR_TEAM_ID_HERE//' DevelopmentTeam.xcconfig
+          xcodegen generate
+      - name: Build without signing
+        working-directory: macos-app
+        run: |
+          xcodebuild \
+            -project HALockBridge.xcodeproj \
+            -scheme HALockBridge \
+            -configuration Release \
+            -destination 'platform=macOS,variant=Mac Catalyst' \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build

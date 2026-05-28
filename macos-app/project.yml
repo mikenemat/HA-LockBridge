@@ -1,0 +1,70 @@
+name: HALockBridge
+options:
+  # No `bundleIdPrefix:` — PRODUCT_BUNDLE_IDENTIFIER below uses
+  # $(BUNDLE_ID_PREFIX) which each contributor sets in their own
+  # (gitignored) DevelopmentTeam.xcconfig.
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "17.0"
+configs:
+  Debug: debug
+  Release: release
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+packages:
+  swift-nio:
+    url: https://github.com/apple/swift-nio
+    from: 2.65.0
+targets:
+  HALockBridge:
+    type: application
+    platform: iOS
+    configFiles:
+      Debug: DevelopmentTeam.xcconfig
+      Release: DevelopmentTeam.xcconfig
+    sources:
+      - path: Sources/HALockBridge
+      - path: Resources/Assets.xcassets
+        type: folder.assetcatalog
+        buildPhase: resources
+      # Status bar template image (Catalyst can't put this in Assets.xcassets
+      # for use via NSImage(contentsOfFile:), so we ship it as a flat resource).
+      - path: Resources/status-bar.png
+        buildPhase: resources
+      - path: Resources/status-bar@2x.png
+        buildPhase: resources
+    dependencies:
+      - package: swift-nio
+        product: NIOCore
+      - package: swift-nio
+        product: NIOPosix
+      - package: swift-nio
+        product: NIOHTTP1
+      - package: swift-nio
+        product: NIOWebSocket
+    info:
+      path: Generated/Info.plist
+      properties:
+        CFBundleDisplayName: HA-LockBridge
+        CFBundleName: HA-LockBridge
+        LSUIElement: true
+        LSRequiresIPhoneOS: false
+        NSHomeKitUsageDescription: "Monitors and controls HomeKit lock accessories and bridges them to HomeAssistant."
+        NSHumanReadableCopyright: "Copyright © 2026 Michael Nemat. Licensed under the MIT License."
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations: {}
+    settings:
+      base:
+        PRODUCT_NAME: HA-LockBridge
+        # Resolved at build time from BUNDLE_ID_PREFIX in DevelopmentTeam.xcconfig.
+        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).HALockBridge
+        MARKETING_VERSION: "0.4.1"
+        CURRENT_PROJECT_VERSION: "1"
+        SUPPORTS_MACCATALYST: YES
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        TARGETED_DEVICE_FAMILY: "2,6"
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: HALockBridge.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

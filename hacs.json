@@ -1,0 +1,7 @@
+{
+  "name": "HA-LockBridge",
+  "render_readme": true,
+  "homeassistant": "2026.3.0",
+  "domains": ["lock", "sensor", "binary_sensor"],
+  "country": ["US"]
+}
