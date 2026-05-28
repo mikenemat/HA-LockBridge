@@ -1,0 +1,116 @@
+name: Release
+
+# Triggered when a tag matching `v*` is pushed. Builds a signed + notarized
+# HA-LockBridge.app, stages it alongside the HACS-installable HA integration,
+# zips the result, and attaches the zip to a GitHub Release named after the
+# tag.
+#
+# Requires the following repository secrets to be populated before this can
+# succeed (it will fail loudly until they are):
+#
+#   APPLE_DEVELOPER_ID_CERT_BASE64    base64 of the .p12 export of your
+#                                     "Developer ID Application" cert
+#   APPLE_DEVELOPER_ID_CERT_PASSWORD  password for the .p12
+#   APPLE_DEVELOPMENT_TEAM            10-char Apple Developer Team ID
+#   APPLE_BUNDLE_ID_PREFIX            reverse-domain prefix (e.g.
+#                                     io.github.mikenemat) — final bundle
+#                                     ID is "<prefix>.HALockBridge"
+#   APPLE_NOTARY_APPLE_ID             Apple ID email
+#   APPLE_NOTARY_APP_PASSWORD         app-specific password generated at
+#                                     appleid.apple.com for notarytool
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # needed to create a Release
+
+jobs:
+  release:
+    name: Build + notarize + publish
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Import Developer ID Application cert
+        env:
+          CERT_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          CERT_PATH="$RUNNER_TEMP/dev_id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+
+          # Decode the cert. printf (not echo) avoids any trailing newline.
+          printf '%s' "$CERT_BASE64" | base64 --decode > "$CERT_PATH"
+
+          # Build a throwaway keychain just for this job. It's wiped when
+          # the runner is torn down, and the cleanup step below removes it
+          # from the user's keychain search list either way.
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$CERT_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          # Allow codesign to use the cert non-interactively.
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          # Sanity: confirm we can see the cert.
+          security find-identity -p codesigning -v "$KEYCHAIN_PATH"
+
+      - name: Write DevelopmentTeam.xcconfig
+        env:
+          DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+          BUNDLE_ID_PREFIX: ${{ secrets.APPLE_BUNDLE_ID_PREFIX }}
+        run: |
+          cat > macos-app/DevelopmentTeam.xcconfig <<EOF
+          DEVELOPMENT_TEAM = $DEVELOPMENT_TEAM
+          BUNDLE_ID_PREFIX = $BUNDLE_ID_PREFIX
+          EOF
+
+      - name: Register notarytool credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          TEAM_ID: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+          APP_PASSWORD: ${{ secrets.APPLE_NOTARY_APP_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials "HALOCKBRIDGE_NOTARY" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$TEAM_ID" \
+            --password "$APP_PASSWORD"
+
+      - name: Build + notarize + staple + zip
+        working-directory: macos-app
+        env:
+          NOTARY_PROFILE: HALOCKBRIDGE_NOTARY
+        run: |
+          # Tag is like v0.4.2; strip leading v for release.sh's --version.
+          VERSION="${GITHUB_REF_NAME#v}"
+          ./scripts/release.sh --version "$VERSION"
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          if [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi
+          rm -f "$RUNNER_TEMP/dev_id.p12"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: macos-app/build/HA-LockBridge-v*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
