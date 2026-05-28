@@ -51,6 +51,9 @@ targets:
         LSUIElement: true
         LSRequiresIPhoneOS: false
         NSHomeKitUsageDescription: "Monitors and controls HomeKit lock accessories and bridges them to HomeAssistant."
+        NSLocalNetworkUsageDescription: "Advertises this bridge on your local network so Home Assistant can discover and connect to it."
+        NSBonjourServices:
+          - _ha-lockbridge._tcp
         NSHumanReadableCopyright: "Copyright © 2026 Michael Nemat. Licensed under the MIT License."
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
