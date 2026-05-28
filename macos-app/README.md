@@ -210,7 +210,7 @@ full lock control — keep this file private and don't share it.
 Server-pushed JSON envelopes:
 
 ```json
-{"type": "hello", "server": "ha-lockbridge", "version": "0.4.2"}
+{"type": "hello", "server": "ha-lockbridge", "version": "0.4.3"}
 {"type": "snapshot", "accessories": [...]}
 {"type": "state", "accessory": {...}}
 {"type": "removed", "id": "<uuid>"}

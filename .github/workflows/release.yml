@@ -23,6 +23,14 @@ on:
   push:
     tags:
       - 'v*'
+  # Allow manual re-runs against an existing tag from the Actions UI. Useful
+  # when the build itself was fine but a downstream step (notarization,
+  # upload) failed transiently and we don't want to bump the version.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag to build (e.g. v0.4.3)'
+        required: true
 
 permissions:
   contents: write   # needed to create a Release
@@ -36,6 +44,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # For tag push, this is empty/the tag automatically. For manual
+          # workflow_dispatch runs, the user picks a specific tag to build.
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -96,9 +108,14 @@ jobs:
           printf '%s' "$PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
 
           # The profile is a CMS-signed plist; security cms -D peels off
-          # the signature wrapper and gives us the plist.
-          PROFILE_UUID=$(security cms -D -i "$PROFILE_PATH" | /usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin)
-          PROFILE_NAME=$(security cms -D -i "$PROFILE_PATH" | /usr/libexec/PlistBuddy -c "Print Name" /dev/stdin)
+          # the signature wrapper and gives us the plist. plutil's `-extract`
+          # supports stdin via `-`; PlistBuddy's /dev/stdin handling is
+          # unreliable and fails with "Cannot parse a NULL or zero-length
+          # data" intermittently — so plutil it is.
+          PROFILE_PLIST="$RUNNER_TEMP/dev-id.plist"
+          security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
+          PROFILE_UUID=$(plutil -extract UUID raw -o - "$PROFILE_PLIST")
+          PROFILE_NAME=$(plutil -extract Name raw -o - "$PROFILE_PLIST")
           cp "$PROFILE_PATH" "$PROFILES_DIR/$PROFILE_UUID.provisionprofile"
 
           echo "Installed profile '$PROFILE_NAME' (UUID $PROFILE_UUID)"
@@ -122,8 +139,11 @@ jobs:
         env:
           NOTARY_PROFILE: HALOCKBRIDGE_NOTARY
         run: |
-          # Tag is like v0.4.2; strip leading v for release.sh's --version.
-          VERSION="${GITHUB_REF_NAME#v}"
+          # Tag is like v0.4.3; strip leading v for release.sh's --version.
+          # On workflow_dispatch, GITHUB_REF_NAME is "main" — fall back to
+          # the explicit input.ref the user supplied.
+          REF="${{ inputs.ref || github.ref_name }}"
+          VERSION="${REF#v}"
           ./scripts/release.sh --version "$VERSION"
 
       - name: Cleanup keychain

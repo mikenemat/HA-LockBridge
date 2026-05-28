@@ -1,7 +1,7 @@
 {
   "domain": "ha_lockbridge",
   "name": "HA-LockBridge",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "config_flow": true,
   "documentation": "https://github.com/mikenemat/ha-lockbridge",
   "issue_tracker": "https://github.com/mikenemat/ha-lockbridge/issues",
