@@ -156,7 +156,7 @@ HA's flow advances to the device-selection screen with your ThorBolts pre-checke
 | Component | Requirement |
 |---|---|
 | Bridge host | An **always-on Mac running macOS 15 (Sequoia) or newer**, signed into the iCloud account your Apple Home lives on, on the same LAN as a HomeKit resident (HomePod / Apple TV / iPad). It must stay awake and logged in — sleep or a logged-out session stops the bridge. |
-| HomeAssistant | 2026.3+ required (brand-icon proxy API added in this release). |
+| HomeAssistant | **2026.3+ recommended** — that release added the brand-icon proxy API the integration's logo uses. Manual installs on older HA versions still work fine; only the integration's logo won't appear. (HACS enforces 2026.3.0 as a hard minimum via `hacs.json`, so use the manual install to run on an earlier version.) |
 | Network | mDNS / Bonjour must traverse between the bridge host and HA. If HA runs in Docker without `--network=host`, mDNS discovery may need extra config. |
 
 ## Caveats
