@@ -159,3 +159,11 @@ HA's flow advances to the device-selection screen with your ThorBolts pre-checke
 ## License
 
 MIT — see [LICENSE](LICENSE). Third-party attribution in [NOTICE.md](NOTICE.md).
+
+## Support this project
+
+HA-LockBridge is free and open source. If you find it useful, donations are
+welcome to help cover the **$99/year Apple Developer Program** fee that keeps
+the macOS app on the Mac App Store — you can
+[**sponsor the project on GitHub**](https://github.com/sponsors/mikenemat).
+Entirely optional, and much appreciated.
