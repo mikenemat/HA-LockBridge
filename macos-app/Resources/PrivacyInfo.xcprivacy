@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Apple's Privacy Manifest. Required for new App Store submissions.
+
+    HA-LockBridge does no user tracking, collects no data, and uses no APIs
+    flagged by Apple as "required reason" APIs:
+      - The bridge stores its own runtime config (instance UUID, bearer
+        tokens for paired Home Assistant clients) in a JSON file at
+        ~/Library/Application Support/HALockBridge/ (sandboxed container).
+        This is the app's own data, not user data.
+      - The bridge talks to Apple's HomeKit framework on the local Mac,
+        which mediates all communication with paired accessories. We do
+        not directly observe network requests, file timestamps, or any
+        of the other categories Apple has flagged.
+
+    NSPrivacyTracking is false: nothing in this app links any data to
+    third parties for cross-app/cross-website tracking.
+
+    NSPrivacyAccessedAPITypes is empty: no required-reason APIs are
+    used. (See https://developer.apple.com/documentation/bundleresources/privacy_manifest_files/describing_use_of_required_reason_api)
+-->
+<plist version="1.0">
+<dict>
+    <key>NSPrivacyTracking</key>
+    <false/>
+    <key>NSPrivacyTrackingDomains</key>
+    <array/>
+    <key>NSPrivacyCollectedDataTypes</key>
+    <array/>
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array/>
+</dict>
+</plist>

@@ -34,6 +34,9 @@ targets:
         buildPhase: resources
       - path: Resources/status-bar@2x.png
         buildPhase: resources
+      # Apple Privacy Manifest. Required for new App Store submissions.
+      - path: Resources/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: swift-nio
         product: NIOCore
@@ -48,6 +51,22 @@ targets:
       properties:
         CFBundleDisplayName: HA-LockBridge
         CFBundleName: HA-LockBridge
+        # Use the MARKETING_VERSION build setting (set under `settings:` below)
+        # as the source of truth so the user-visible version in App Store
+        # Connect / Finder matches the version we bump in CHANGELOG.
+        # Without these explicit lines xcodegen writes literal "1.0" / "1"
+        # placeholders and the build never substitutes them.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # Required for Mac App Store submission. "Utilities" matches the
+        # actual function — this is a bridge tool, not a productivity or
+        # lifestyle app. Other valid UTIs at
+        # https://developer.apple.com/documentation/bundleresources/information_property_list/lsapplicationcategorytype
+        LSApplicationCategoryType: "public.app-category.utilities"
+        # Skips the App Store Connect "export compliance" question on every
+        # upload. We use only Apple's first-party frameworks (URLSession,
+        # CryptoKit, etc.); no custom crypto, no third-party crypto libraries.
+        ITSAppUsesNonExemptEncryption: false
         LSUIElement: true
         LSRequiresIPhoneOS: false
         NSHomeKitUsageDescription: "Monitors and controls smart lock accessories paired in your Apple Home and bridges them to Home Assistant."

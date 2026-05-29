@@ -224,6 +224,16 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         trackedAccessories[accessory.uniqueIdentifier] = accessory
 
         log("Lock discovered: \(accessory.name) [\(accessory.uniqueIdentifier.uuidString)] reachable=\(accessory.isReachable)")
+        // Log manufacturer + model from the synchronous HMAccessory
+        // properties so the discovery trace shows accessory identity even
+        // when reachable=false. (HomeKit eagerly caches these regardless
+        // of reachability.)
+        if let m = accessory.manufacturer {
+            log("  \(accessory.name): manufacturer=\(m)")
+        }
+        if let m = accessory.model {
+            log("  \(accessory.name): model=\(m)")
+        }
         accessory.delegate = self
 
         if accessory.isReachable {
@@ -244,10 +254,13 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             HMCharacteristicTypeBatteryLevel,
             HMCharacteristicTypeStatusLowBattery,
         ]
+        // Only SerialNumber is read as a characteristic. The other three
+        // (Manufacturer, Model, FirmwareVersion) are deprecated since iOS 11
+        // and unavailable on macOS — Apple's replacement is direct
+        // HMAccessory.manufacturer / .model / .firmwareVersion properties,
+        // which we read synchronously in recomputeAndPublish. SerialNumber
+        // has no equivalent property and stays on the characteristic path.
         let readOnceTypes: Set<String> = [
-            HMCharacteristicTypeManufacturer,
-            HMCharacteristicTypeModel,
-            HMCharacteristicTypeFirmwareVersion,
             HMCharacteristicTypeSerialNumber,
         ]
 
@@ -291,7 +304,11 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             guard let value = characteristic.value as? String else { return }
             let key = self.shortType(characteristic.characteristicType)
             self.infoCache[accessory.uniqueIdentifier, default: [:]][key] = value
-            if key == "manufacturer" || key == "model" || key == "serial_number" {
+            // Only serial_number arrives via this path now; manufacturer +
+            // model are logged synchronously at discovery time in
+            // considerAccessory(). Keep the same log shape for grep
+            // continuity in dashboards / debug scripts.
+            if key == "serial_number" {
                 self.log("  \(accessory.name): \(key)=\(value)")
             }
             self.recomputeAndPublish(for: accessory, reason: "info:\(key)")
@@ -390,7 +407,16 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
 
     private func recomputeAndPublish(for accessory: HMAccessory, reason: String) {
         let id = accessory.uniqueIdentifier
-        let info = infoCache[id] ?? [:]
+        // Start from the cached info (currently just serial_number from the
+        // characteristic-read path) and overlay the live HMAccessory
+        // properties for manufacturer / model / firmwareVersion. These were
+        // previously read as characteristics but those types are deprecated
+        // on Mac Catalyst and unavailable on macOS — the direct accessor
+        // properties are Apple's replacement.
+        var info = infoCache[id] ?? [:]
+        if let m = accessory.manufacturer { info["manufacturer"] = m }
+        if let m = accessory.model { info["model"] = m }
+        if let fv = accessory.firmwareVersion { info["firmware_version"] = fv }
 
         // Detect target_state change so the lifecycle derivation can produce
         // "locking"/"unlocking" during the transition window.
@@ -458,9 +484,6 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         case HMCharacteristicTypeTargetLockMechanismState: return "target_state"
         case HMCharacteristicTypeBatteryLevel: return "battery_level"
         case HMCharacteristicTypeStatusLowBattery: return "low_battery"
-        case HMCharacteristicTypeManufacturer: return "manufacturer"
-        case HMCharacteristicTypeModel: return "model"
-        case HMCharacteristicTypeFirmwareVersion: return "firmware_version"
         case HMCharacteristicTypeSerialNumber: return "serial_number"
         default: return uuidString
         }
