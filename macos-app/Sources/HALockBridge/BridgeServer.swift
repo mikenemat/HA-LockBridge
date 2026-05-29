@@ -371,7 +371,13 @@ final class WSConnection: ChannelInboundHandler {
 
 // MARK: - HTTP request handler
 
-final class HTTPRequestHandler: ChannelInboundHandler, RemovableChannelHandler {
+// NIO ChannelInboundHandlers are always invoked on a single event loop's
+// thread; concurrent access from other queues never happens by design.
+// `@unchecked Sendable` reflects that runtime contract — Swift's static
+// concurrency checker can't prove single-threaded access on a class, but
+// the NIO contract gives us the guarantee. Required because the closure
+// in makeBootstrap() that removes this handler post-upgrade is Sendable.
+final class HTTPRequestHandler: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
@@ -432,7 +438,6 @@ final class HTTPRequestHandler: ChannelInboundHandler, RemovableChannelHandler {
 
     private func handle(head: HTTPRequestHead, body: ByteBuffer?, context: ChannelHandlerContext) {
         let path = URLComponents(string: head.uri)?.path ?? head.uri
-        let query = URLComponents(string: head.uri)?.queryItems ?? []
 
         // DEBUG: log every incoming request so we can see what's reaching the
         // HTTP handler vs. being intercepted by the WS upgrader.
