@@ -135,14 +135,21 @@ python3 Resources/generate_icon.py      # regenerate the app icon
 
 ## Cutting a release (maintainer-only)
 
-```bash
-./scripts/release.sh
-```
+End-user distribution is via the Mac App Store. The release flow is:
 
-Builds a signed Release, submits to Apple's notary service, staples the
-ticket, and zips the result as `build/HA-LockBridge-v<version>.zip` ready
-for upload to GitHub Releases. See the script header for the one-time
-setup of the notary keychain profile.
+1. Bump `MARKETING_VERSION` in `project.yml` and the version strings in
+   `BridgeServer.swift` (`hello` envelope + `/info`), `BonjourService.swift`
+   (TXT record), and `custom_components/ha_lockbridge/manifest.json`.
+2. Open `HALockBridge.xcodeproj` in Xcode.
+3. Select the **Generic Mac Catalyst Device** destination.
+4. Product → **Archive**. The archive shows up in Window → Organizer.
+5. Click **Distribute App** → **App Store Connect** → **Upload**.
+6. Submit for review from App Store Connect.
+
+HomeKit's restricted entitlement means Developer ID notarized distribution
+isn't an option on macOS — Apple's profile generator silently strips the
+HomeKit entitlement from any Developer ID provisioning profile, regardless
+of what's checked on the App ID. Mac App Store is the only path.
 
 ## Layout
 
@@ -154,8 +161,7 @@ macos-app/
 ├── DevelopmentTeam.xcconfig.example← copy to .xcconfig (gitignored)
 ├── scripts/
 │   ├── install.sh                  ← build + copy to /Applications/ (contributor convenience)
-│   ├── uninstall.sh                ← remove app (+ optional --purge config)
-│   └── release.sh                  ← maintainer release: build + notarize + staple + zip
+│   └── uninstall.sh                ← remove app (+ optional --purge config)
 ├── Resources/
 │   ├── generate_icon.py            ← regenerate the app icon from scratch
 │   └── Assets.xcassets/AppIcon.appiconset/
@@ -210,7 +216,7 @@ full lock control — keep this file private and don't share it.
 Server-pushed JSON envelopes:
 
 ```json
-{"type": "hello", "server": "ha-lockbridge", "version": "0.4.5"}
+{"type": "hello", "server": "ha-lockbridge", "version": "0.5.0"}
 {"type": "snapshot", "accessories": [...]}
 {"type": "state", "accessory": {...}}
 {"type": "removed", "id": "<uuid>"}

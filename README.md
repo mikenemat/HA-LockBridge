@@ -77,16 +77,27 @@ Each has its own README with build/install details.
 
 ### 1. Install the bridge on your always-on Mac
 
-Download `HA-LockBridge.app` from the [latest GitHub Release](https://github.com/mikenemat/ha-lockbridge/releases/latest)
-and drag it to `/Applications`. Double-click to launch.
+The bridge is currently install-from-source. A Mac App Store listing is in
+preparation but not yet shipped — Apple's HomeKit entitlement requires App
+Store distribution for macOS, not Developer ID, so there's no notarized
+GitHub Release download path.
+
+Build instructions are in [`macos-app/README.md`](macos-app/README.md).
+You'll need Xcode and any Apple ID (free tier works fine). Short version:
+
+```bash
+cd macos-app
+brew install xcodegen
+cp DevelopmentTeam.xcconfig.example DevelopmentTeam.xcconfig   # then edit your team ID + bundle ID prefix
+./build.sh                 # first time: see macos-app/README.md for the one-time HomeKit capability step in Xcode
+./scripts/install.sh       # copies to /Applications
+```
 
 On first launch:
-1. Click **Allow** on the macOS HomeKit access prompt.
+1. Click **Allow** on the macOS Home Data access prompt.
 2. From the menu bar icon, enable **Start at Login** so the bridge auto-launches with your Mac.
 
 The bridge window appears showing **"Waiting for Home Assistant to pair"**.
-
-> Prefer to build from source? See [`macos-app/README.md`](macos-app/README.md) — you'll need Xcode and an Apple ID.
 
 ### 2. Install the HA integration
 

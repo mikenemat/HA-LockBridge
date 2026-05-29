@@ -4,9 +4,29 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
-## [0.4.5] — 2026-05-28
+## [0.5.0] — 2026-05-28
 
 ### Changed
+- **Distribution pivot: Mac App Store, not Developer ID.** A spike with the
+  paid Apple Developer Program confirmed that Apple silently strips the
+  `com.apple.developer.homekit` entitlement from any Developer ID
+  provisioning profile, regardless of what's checked on the App ID. HomeKit
+  on macOS is App-Store-only by policy. The whole Developer ID + notarized
+  GitHub Release pipeline (`.github/workflows/release.yml`,
+  `macos-app/scripts/release.sh`, the v0.4.1–v0.4.5 release attempts) is
+  removed. End-user installs from source for now; App Store listing is in
+  preparation.
+- **App is now sandboxed.** Added `com.apple.security.app-sandbox`,
+  `com.apple.security.network.server`, and `com.apple.security.network.client`
+  entitlements (required for App Store). A spike confirmed `HMHomeManager`,
+  Bonjour publish, and the HTTP/WS server all work cleanly under sandbox
+  with no additional restricted entitlements (notably no
+  `com.apple.developer.networking.multicast`, which would have needed
+  separate Apple approval). One-time effect for existing users: the config
+  path moves from `~/Library/Application Support/HALockBridge/` to the
+  per-app sandbox container at
+  `~/Library/Containers/<bundle-id>/Data/Library/Application Support/HALockBridge/`,
+  orphaning paired-client tokens. Re-pair with HA on upgrade.
 - **Auto-start at login moved into the app.** The previous shell-script
   LaunchAgent workflow (`install-launchagent.sh`, `uninstall-launchagent.sh`,
   `launchagent.plist.template`, `launch-wrapper.sh`) is replaced by an
