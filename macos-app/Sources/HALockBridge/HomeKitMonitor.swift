@@ -154,6 +154,20 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
 
     func homeManager(_ manager: HMHomeManager, didUpdate status: HMHomeManagerAuthorizationStatus) {
         log("Authorization status changed: \(describe(status))")
+        // Apple's docs say homeManagerDidUpdateHomes(_:) is called
+        // automatically when the framework gains access to home data, which
+        // *should* cover the TCC-grant transition. Empirically, on Mac
+        // Catalyst first launch (and only first launch — after that, the
+        // homes are already cached), homeManagerDidUpdateHomes(_:) does not
+        // reliably fire on the undetermined → authorized transition, leaving
+        // the accessory list stuck at zero until the app is restarted.
+        // Trigger the enumeration explicitly here. The call is idempotent
+        // — considerAccessory() short-circuits on accessories already in
+        // trackedAccessories — so if Apple's delegate method does fire
+        // afterwards, nothing happens twice.
+        if status.contains(.authorized) {
+            homeManagerDidUpdateHomes(manager)
+        }
     }
 
     func homeManagerDidUpdateHomes(_ manager: HMHomeManager) {
