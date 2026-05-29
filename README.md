@@ -11,6 +11,14 @@ itself as a *second* HomeKit controller in your home and exposes its accessories
 to HA over a local HTTP + WebSocket API. The lock stays paired with Apple Home;
 HA just gets read/write access through the bridge.
 
+> [!IMPORTANT]
+> **You need an always-on Mac.** HA-LockBridge is a macOS app — it must run on a
+> Mac (a mini, an iMac, or any Mac left powered on) that **stays awake**, is
+> signed into the iCloud account your Apple Home uses, and runs **macOS 15
+> (Sequoia) or newer**. There is no iOS, iPad, Apple TV, or standalone-hardware
+> version; the bridge has to be a logged-in macOS controller in your home. See
+> [Requirements](#requirements) for details.
+
 ## Get the macOS app
 
 **The macOS bridge is distributed exclusively through the Mac App Store.** That
@@ -147,7 +155,7 @@ HA's flow advances to the device-selection screen with your ThorBolts pre-checke
 
 | Component | Requirement |
 |---|---|
-| Bridge host | macOS 14+ (Sonoma or later), signed into the iCloud account your Apple Home lives on, on the same LAN as a HomeKit resident (HomePod / Apple TV / iPad). |
+| Bridge host | An **always-on Mac running macOS 15 (Sequoia) or newer**, signed into the iCloud account your Apple Home lives on, on the same LAN as a HomeKit resident (HomePod / Apple TV / iPad). It must stay awake and logged in — sleep or a logged-out session stops the bridge. |
 | HomeAssistant | 2026.3+ required (brand-icon proxy API added in this release). |
 | Network | mDNS / Bonjour must traverse between the bridge host and HA. If HA runs in Docker without `--network=host`, mDNS discovery may need extra config. |
 
