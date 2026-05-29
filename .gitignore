@@ -30,6 +30,11 @@ xcuserdata/
 macos-app/build/
 macos-app/Generated/
 
+# --- App Store screenshots (contain real lock names / HA IPs) ---
+# The composer script (make_appstore_screenshots.py) is tracked; the raw grabs
+# and generated images are not — they leak private home/network details.
+macos-app/Resources/screenshots/
+
 # --- Local team config (each contributor sets their own) ---
 macos-app/DevelopmentTeam.xcconfig
 

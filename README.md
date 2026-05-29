@@ -11,6 +11,27 @@ itself as a *second* HomeKit controller in your home and exposes its accessories
 to HA over a local HTTP + WebSocket API. The lock stays paired with Apple Home;
 HA just gets read/write access through the bridge.
 
+## Get the macOS app
+
+**The macOS bridge is distributed exclusively through the Mac App Store.** That
+is the only supported way to install it — there is no download, installer, or
+notarized release here on GitHub. Apple requires the HomeKit entitlement to ship
+via the App Store on macOS (Developer ID / notarized distribution is not
+permitted for HomeKit apps), so the App Store is the one and only channel.
+
+<p align="center">
+  <a href="https://apps.apple.com/app/id6774393748">
+    <strong>➜ Download HA-LockBridge on the Mac App Store</strong>
+  </a>
+</p>
+
+The companion **Home Assistant integration** is what lives in this repo (see
+[Quick start](#quick-start) below) — install that via HACS.
+
+## Demo
+
+https://github.com/user-attachments/assets/9b362233-e16b-4cc6-ab6c-80b62875407c
+
 ## Built for ThorBolt X1, works with any HomeKit lock
 
 The integration was developed with [ThorBolt X1](https://thorbolt.com) (sold by
@@ -75,29 +96,21 @@ Each has its own README with build/install details.
 
 ## Quick start
 
-### 1. Install the bridge on your always-on Mac
+### 1. Install the macOS bridge from the Mac App Store
 
-The bridge is currently install-from-source. A Mac App Store listing is in
-preparation but not yet shipped — Apple's HomeKit entitlement requires App
-Store distribution for macOS, not Developer ID, so there's no notarized
-GitHub Release download path.
+Install **[HA-LockBridge from the Mac App Store](https://apps.apple.com/app/id6774393748)**
+onto a Mac that stays powered on and is signed into the iCloud account your
+Apple Home lives on. On first launch:
 
-Build instructions are in [`macos-app/README.md`](macos-app/README.md).
-You'll need Xcode and any Apple ID (free tier works fine). Short version:
-
-```bash
-cd macos-app
-brew install xcodegen
-cp DevelopmentTeam.xcconfig.example DevelopmentTeam.xcconfig   # then edit your team ID + bundle ID prefix
-./build.sh                 # first time: see macos-app/README.md for the one-time HomeKit capability step in Xcode
-./scripts/install.sh       # copies to /Applications
-```
-
-On first launch:
 1. Click **Allow** on the macOS Home Data access prompt.
 2. From the menu bar icon, enable **Start at Login** so the bridge auto-launches with your Mac.
 
 The bridge window appears showing **"Waiting for Home Assistant to pair"**.
+
+> **Contributors:** you can build the app yourself instead of installing from
+> the App Store — see [`macos-app/README.md`](macos-app/README.md). A local
+> build signed with a free Apple Developer account re-signs every 7 days, so
+> end users should always install from the App Store (no such rotation).
 
 ### 2. Install the HA integration
 
