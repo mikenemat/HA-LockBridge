@@ -28,6 +28,12 @@ permitted for HomeKit apps), so the App Store is the one and only channel.
 The companion **Home Assistant integration** is what lives in this repo (see
 [Quick start](#quick-start) below) — install that via HACS.
 
+> **Advanced users** can build the macOS app themselves with Xcode instead — the
+> full source is in [`macos-app/`](macos-app/). Note that a build signed with a
+> free Apple Developer account is only valid for **7 days**; after that macOS
+> blocks it from launching until you rebuild and re-sign. The Mac App Store build
+> has no such expiry, which is why it's the recommended path for everyone else.
+
 ## Demo
 
 https://github.com/user-attachments/assets/9b362233-e16b-4cc6-ab6c-80b62875407c
@@ -107,10 +113,9 @@ Apple Home lives on. On first launch:
 
 The bridge window appears showing **"Waiting for Home Assistant to pair"**.
 
-> **Contributors:** you can build the app yourself instead of installing from
-> the App Store — see [`macos-app/README.md`](macos-app/README.md). A local
-> build signed with a free Apple Developer account re-signs every 7 days, so
-> end users should always install from the App Store (no such rotation).
+> **Contributors:** build instructions for the macOS app are in
+> [`macos-app/README.md`](macos-app/README.md). (Self-signing caveats are
+> covered under [Get the macOS app](#get-the-macos-app) above.)
 
 ### 2. Install the HA integration
 
