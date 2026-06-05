@@ -39,6 +39,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     var store: TokenStore?
     var statusBar: StatusBarController?
     var interactionLog: InteractionLog?
+    var lockEventLog: LockEventLog?
 
     // SwiftUI status window
     var statusVM: StatusViewModel?
@@ -151,6 +152,25 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                 }
             }
             self.interactionLog = interactionLog
+
+            // Lock health log. Mirrors the InteractionLog wiring pattern
+            // but with a longer display window (20) since these events
+            // are higher signal-to-noise and the user wants history.
+            let lockEventLog = LockEventLog()
+            lockEventLog.onChange = { [weak self, weak viewModel] in
+                guard let log = self?.lockEventLog else { return }
+                let snapshot = log.recent(20)
+                Task { @MainActor in
+                    viewModel?.recentLockEvents = snapshot
+                }
+            }
+            self.lockEventLog = lockEventLog
+            // Inject into the monitor so the background-write retry loop
+            // and reachability delegate can record events. Done here (vs.
+            // in startup before m.start()) because the log is owned by
+            // the bridge-server scope; the CLI-test mode doesn't need it
+            // and intentionally leaves monitor.lockEventLog == nil.
+            monitor.lockEventLog = lockEventLog
 
             // Wire PairingManager → ViewModel. Also bounce the Dock icon so
             // the user notices even if the pair window is behind other apps.

@@ -32,14 +32,23 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         let target: Int
         let priorState: AccessoryState?
         let deadline: Date
+        /// When this command was accepted. Used to compute the
+        /// writeRetry event's duration on completion.
+        let startedAt: Date
         var completed: Bool = false
         var triggered: Bool = false
         var attempt: Int = 0
+        /// LockEventLog event ID for this command's retry record.
+        /// Nil until the first HMError 82 fires — successful first-try
+        /// writes don't create a log entry (the user only wants to see
+        /// the rough edges, not every successful command).
+        var retryLogEventID: UUID?
 
-        init(target: Int, priorState: AccessoryState?, deadline: Date) {
+        init(target: Int, priorState: AccessoryState?, deadline: Date, startedAt: Date) {
             self.target = target
             self.priorState = priorState
             self.deadline = deadline
+            self.startedAt = startedAt
         }
     }
 
@@ -78,6 +87,14 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     /// already routes through the cache. Optional only to keep tests +
     /// CLI-mode paths buildable without one — real launches always set it.
     var identityCache: AccessoryIdentityCache?
+
+    /// Health-event sink for the Stats page's "Lock Errors/Warnings"
+    /// section. Injected from AppDelegate before `start()`. Optional
+    /// only to keep tests + CLI-mode paths buildable without one —
+    /// real launches always set it. When nil, all event-emitting paths
+    /// (background-write retries, reachability gaps) silently no-op
+    /// on the logging side; functional behavior is unaffected.
+    var lockEventLog: LockEventLog?
     /// Accessories whose SerialNumber characteristic exists but failed all
     /// retry attempts. Treated as "no serial available, ever" — the cache
     /// commits the fallback HMAccessory.uniqueIdentifier instead of
@@ -114,6 +131,13 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     /// loop to retry immediately on recovery instead of waiting out the
     /// backoff timer.
     private var reachabilityRecoveryWaiters: [UUID: [() -> Void]] = [:]
+
+    /// Per-accessory wall-clock timestamp of when isReachable last went
+    /// `false`. Cleared on recovery. Used to compute the gap duration
+    /// recorded into the LockEventLog when isReachable returns to true.
+    /// Populated by both `considerAccessory` (startup-unreachable case)
+    /// and `accessoryDidUpdateReachability`.
+    private var unreachableSince: [UUID: Date] = [:]
 
     private var pendingCommand: PendingCommand?
     private var commandFired = false
@@ -265,7 +289,8 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         let pending = PendingWrite(
             target: target,
             priorState: priorState,
-            deadline: Date().addingTimeInterval(Self.writeBudgetSeconds)
+            deadline: Date().addingTimeInterval(Self.writeBudgetSeconds),
+            startedAt: Date()
         )
         pendingWrites[hmID] = pending
 
@@ -317,6 +342,11 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
                 let delay = Self.writeBackoffDelays[delayIdx]
                 self.log("Lock \(accessory.name): write rejected as not-reachable (attempt \(thisAttempt), retry in up to \(delay)s or on reachability recovery)")
 
+                // Surface this rough edge to the Stats page. On the very
+                // first 82 we open a new event; on subsequent 82s we just
+                // advance the attempt counter on the open event.
+                self.recordOrAdvanceWriteRetry(pending: pending, accessory: accessory)
+
                 // The fire closure is idempotent — only the first caller
                 // (timer OR reachability waiter) actually triggers the
                 // next attempt. The other is a no-op.
@@ -344,7 +374,63 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             pending.completed = true
             self.pendingWrites.removeValue(forKey: hmID)
             self.lastTargetChange[hmID] = Date()
+            // Close any open writeRetry event for this command. Only
+            // present if at least one retry was needed (single-attempt
+            // success never opens an event in the first place).
+            self.closeWriteRetryEvent(pending: pending, outcome: .succeeded)
             self.recomputeAndPublish(for: accessory, reason: "post-write")
+        }
+    }
+
+    /// Open a writeRetry event on the first HMError 82 for this command,
+    /// or advance the attempt counter on subsequent 82s.
+    private func recordOrAdvanceWriteRetry(pending: PendingWrite, accessory: HMAccessory) {
+        guard let log = lockEventLog else { return }
+        let actionLabel = pending.target == 1 ? "lock" : "unlock"
+        let elapsedMs = Int(Date().timeIntervalSince(pending.startedAt) * 1000)
+        if let id = pending.retryLogEventID {
+            log.update(id: id) { e in
+                if case .writeRetry(let action, _, _, _) = e.kind {
+                    e.kind = .writeRetry(
+                        targetAction: action,
+                        attempts: pending.attempt,
+                        durationMs: elapsedMs,
+                        outcome: .ongoing
+                    )
+                }
+            }
+        } else {
+            let newID = UUID()
+            pending.retryLogEventID = newID
+            log.record(.init(
+                id: newID,
+                accessoryName: accessory.name,
+                accessoryID: accessory.uniqueIdentifier.uuidString,
+                timestamp: pending.startedAt,
+                kind: .writeRetry(
+                    targetAction: actionLabel,
+                    attempts: pending.attempt,
+                    durationMs: elapsedMs,
+                    outcome: .ongoing
+                )
+            ))
+        }
+    }
+
+    /// Close the open writeRetry event for a terminating background
+    /// write. No-op if no event was opened (single-attempt success).
+    private func closeWriteRetryEvent(pending: PendingWrite, outcome: LockEventLog.WriteOutcome) {
+        guard let log = lockEventLog, let id = pending.retryLogEventID else { return }
+        let finalMs = Int(Date().timeIntervalSince(pending.startedAt) * 1000)
+        log.update(id: id) { e in
+            if case .writeRetry(let action, let attempts, _, _) = e.kind {
+                e.kind = .writeRetry(
+                    targetAction: action,
+                    attempts: attempts,
+                    durationMs: finalMs,
+                    outcome: outcome
+                )
+            }
         }
     }
 
@@ -375,9 +461,12 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
 
         if let c = liveCurrent, c == pending.target {
             log("Lock \(accessory.name): physical current_state already matches pending target=\(pending.target); skipping revert")
+            closeWriteRetryEvent(pending: pending, outcome: .satisfiedExternally)
             recomputeAndPublish(for: accessory, reason: "write-giveup-already-at-target")
             return
         }
+
+        closeWriteRetryEvent(pending: pending, outcome: .reverted)
 
         guard let prior = pending.priorState else {
             recomputeAndPublish(for: accessory, reason: "write-giveup-no-prior")
@@ -486,6 +575,10 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             pending.completed = true
         }
         reachabilityRecoveryWaiters.removeValue(forKey: id)
+        // If we were tracking an open reachability gap, drop it on the
+        // floor — the accessory is gone, the gap duration is moot and
+        // there's no UI value in surfacing it as "lasted forever".
+        unreachableSince.removeValue(forKey: id)
         for o in observers {
             o.onRemoved(removedWireID)
         }
@@ -521,6 +614,8 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             subscribeAndRead(accessory)
         } else {
             log("  \(accessory.name): unreachable at startup, will retry on reachability change")
+            // Track the gap start so we can record duration on recovery.
+            openUnreachableGap(for: accessory, at: Date())
             // Still publish the initial (unreachable) state so consumers know it exists.
             recomputeAndPublish(for: accessory, reason: "initial-unreachable")
         }
@@ -724,8 +819,48 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
                 log("  firing \(waiters.count) reachability waiter(s) for \(accessory.name)")
                 for w in waiters { w() }
             }
+            // Close any open unreachable-gap event for this accessory
+            // with its final wall-clock duration.
+            closeUnreachableGap(for: accessory, at: Date())
+        } else if !accessory.isReachable, trackedAccessories[hmID] != nil {
+            // Open a new gap event. Guarded against double-open in case
+            // we get back-to-back reach=false delegate calls (rare but
+            // possible per Apple's docs — the property may settle).
+            openUnreachableGap(for: accessory, at: Date())
         }
         recomputeAndPublish(for: accessory, reason: "reachability")
+    }
+
+    /// Open a `.unreachableGap` event for this accessory at `at`, unless
+    /// one is already open. Tracks the start time in `unreachableSince`
+    /// for duration computation on close.
+    private func openUnreachableGap(for accessory: HMAccessory, at: Date) {
+        let hmID = accessory.uniqueIdentifier
+        if unreachableSince[hmID] != nil { return }  // already open
+        unreachableSince[hmID] = at
+        guard let log = lockEventLog else { return }
+        log.record(.init(
+            id: UUID(),
+            accessoryName: accessory.name,
+            accessoryID: hmID.uuidString,
+            timestamp: at,
+            kind: .unreachableGap(durationSec: nil)
+        ))
+    }
+
+    /// Close the most recently opened, still-open `.unreachableGap`
+    /// event for this accessory, recording the final duration. No-op if
+    /// no gap is currently tracked (either we never saw the close-side
+    /// transition, or the event has aged out of the buffer).
+    private func closeUnreachableGap(for accessory: HMAccessory, at: Date) {
+        let hmID = accessory.uniqueIdentifier
+        guard let started = unreachableSince.removeValue(forKey: hmID) else { return }
+        let duration = at.timeIntervalSince(started)
+        guard let log = lockEventLog,
+              let eventID = log.openGapID(forAccessory: hmID.uuidString) else { return }
+        log.update(id: eventID) { e in
+            e.kind = .unreachableGap(durationSec: duration)
+        }
     }
 
     func accessoryDidUpdateName(_ accessory: HMAccessory) {
@@ -840,6 +975,7 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             log("Lock \(accessory.name): pending write target=\(pending.target) satisfied by external change; cancelling background retry")
             pending.completed = true
             pendingWrites.removeValue(forKey: id)
+            closeWriteRetryEvent(pending: pending, outcome: .satisfiedExternally)
             // Clearing the transition window lets deriveLifecycle return
             // a stable "locked"/"unlocked" since current==target. We don't
             // change `newState.lifecycleState` here — the next

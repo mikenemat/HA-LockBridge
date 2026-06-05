@@ -4,6 +4,36 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.5.3] — 2026-06-05
+
+### Added
+- **"Lock Errors/Warnings" section on the Stats & Debug page.** Surfaces
+  the rough edges that 0.5.2 handles transparently behind the scenes, so
+  the user can see when the system is healing things on their behalf
+  (and when it isn't). Two event types are recorded into a new ring
+  buffer (`LockEventLog`, capacity 100) and shown in a 140pt-tall
+  scrollable list, most-recent first:
+  - **Write retries.** Open on the first `HMError 82` for a setLockState
+    command, advance per attempt, close with one of four outcomes
+    — `ongoing` (live), `succeeded` (retry resolved), `reverted` (30s
+    budget elapsed, optimistic state silently reverted), or
+    `satisfiedExternally` (current_state reached target via HomeKey /
+    manual / another controller while we were retrying). Single-attempt
+    successes don't create an event — only the rough edges are shown.
+  - **Reachability gaps.** Opened when `HMAccessory.isReachable` goes
+    `false` (including the startup-already-unreachable case), closed
+    with the wall-clock duration when it returns to `true`. Open gaps
+    render as "currently unreachable — Xs"; closed gaps as
+    "unreachable — recovered" with the final duration.
+- New `LockEventLog` class follows the existing `InteractionLog` pattern
+  (thread-safe ring buffer, `onChange` callback, AppDelegate forwards
+  snapshot into `StatusViewModel.recentLockEvents` `@Published`,
+  StatusView renders). Injected into `HomeKitMonitor` the same way
+  `identityCache` is.
+
+### Changed
+- `MARKETING_VERSION` 0.5.2 → 0.5.3, `CURRENT_PROJECT_VERSION` 4 → 5.
+
 ## [0.5.2] — 2026-06-05
 
 ### Fixed

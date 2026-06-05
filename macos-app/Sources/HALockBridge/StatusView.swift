@@ -160,6 +160,38 @@ struct StatusView: View {
 
             Divider()
 
+            // "Lock Errors/Warnings" — surfaces the rough edges that the
+            // bridge handles transparently (background-write retries,
+            // reachability gaps) so the user can see when the system
+            // is healing things on their behalf. Empty state shows
+            // "(no warnings)" so users know it's working as intended,
+            // not a missing feature.
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Image(systemName: "exclamationmark.triangle")
+                    Text("Lock Errors/Warnings").font(.headline)
+                    Spacer()
+                }
+                if viewModel.recentLockEvents.isEmpty {
+                    Text("(no warnings)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 22)
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(viewModel.recentLockEvents) { event in
+                                lockEventRow(event)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 140)
+                }
+            }
+
+            Divider()
+
             HStack {
                 Image(systemName: "stethoscope")
                 Text("Locks tracked (\(accessories.count))").font(.headline)
@@ -248,6 +280,93 @@ struct StatusView: View {
                 .foregroundColor(.secondary)
                 .lineLimit(1)
         }
+    }
+
+    /// Render one lock health event. Color + icon convey severity at a
+    /// glance: orange triangle for in-progress / resolved-successfully,
+    /// red for revert (the only "user actually lost the operation"
+    /// outcome). Reachability gaps follow the same color scheme — open
+    /// gaps are orange (system is currently degraded but healing-eligible),
+    /// closed gaps render in neutral text since they're historical.
+    private func lockEventRow(_ event: LockEventLog.Event) -> some View {
+        let (icon, color, summary, detail) = Self.formatLockEvent(event)
+        return HStack(spacing: 6) {
+            Image(systemName: icon)
+                .imageScale(.small)
+                .foregroundColor(color)
+                .frame(width: 16)
+            Text(event.accessoryName)
+                .font(.caption.weight(.medium))
+                .lineLimit(1)
+            Text(summary)
+                .font(.caption.monospaced())
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Text(detail)
+                .font(.caption.monospaced())
+                .foregroundColor(.secondary)
+            Text(Self.interactionTimeFormatter.string(from: event.timestamp))
+                .font(.caption.monospaced())
+                .foregroundColor(.secondary)
+        }
+    }
+
+    /// Returns (icon, color, leading-summary, trailing-detail) for a
+    /// lock event. Split out so the row body stays declarative.
+    private static func formatLockEvent(_ event: LockEventLog.Event) -> (String, Color, String, String) {
+        switch event.kind {
+        case .writeRetry(let action, let attempts, let durationMs, let outcome):
+            let durStr = formatDurationMs(durationMs)
+            switch outcome {
+            case .ongoing:
+                return ("hourglass",
+                        .orange,
+                        "retrying \(action) — attempt \(attempts)",
+                        durStr)
+            case .succeeded:
+                return ("checkmark.circle",
+                        .orange,
+                        "delayed \(action) — succeeded (\(attempts) attempt\(attempts == 1 ? "" : "s"))",
+                        durStr)
+            case .reverted:
+                return ("xmark.octagon",
+                        .red,
+                        "failed \(action) — reverted (\(attempts) attempt\(attempts == 1 ? "" : "s"))",
+                        durStr)
+            case .satisfiedExternally:
+                return ("arrow.triangle.branch",
+                        .secondary,
+                        "delayed \(action) — satisfied externally",
+                        durStr)
+            }
+        case .unreachableGap(let durationSec):
+            if let d = durationSec {
+                return ("antenna.radiowaves.left.and.right",
+                        .secondary,
+                        "unreachable — recovered",
+                        formatDurationSec(d))
+            } else {
+                let elapsed = Date().timeIntervalSince(event.timestamp)
+                return ("antenna.radiowaves.left.and.right.slash",
+                        .orange,
+                        "currently unreachable",
+                        formatDurationSec(elapsed))
+            }
+        }
+    }
+
+    private static func formatDurationMs(_ ms: Int) -> String {
+        if ms < 1000 { return "\(ms)ms" }
+        let secs = Double(ms) / 1000.0
+        return String(format: "%.1fs", secs)
+    }
+
+    private static func formatDurationSec(_ s: Double) -> String {
+        if s < 60 { return String(format: "%.1fs", s) }
+        let mins = Int(s / 60)
+        let rem = Int(s.truncatingRemainder(dividingBy: 60))
+        return "\(mins)m\(rem)s"
     }
 
     private static let interactionTimeFormatter: DateFormatter = {

@@ -31,6 +31,10 @@ final class StatusViewModel: ObservableObject {
     /// live as events arrive. Surfaced in the debug view's header so the
     /// user can watch activity flow without leaving the status window.
     @Published var recentInteractions: [InteractionLog.Event] = []
+    /// Most-recent-first list of lock health events (write retries and
+    /// reachability gaps). Surfaced in the debug view's "Lock
+    /// Errors/Warnings" section. Capped at the view's display count.
+    @Published var recentLockEvents: [LockEventLog.Event] = []
     /// Live remote-IP list for every currently-connected HA WebSocket.
     /// Drives the green/red indicator in the debug view. Kept @Published
     /// (vs. a snapshot value in the .debug enum case) so the indicator
