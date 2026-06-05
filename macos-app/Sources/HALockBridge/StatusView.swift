@@ -186,7 +186,13 @@ struct StatusView: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxHeight: 140)
+                    // Cap at 240pt (was 140 in 0.5.3) — paired with the
+                    // window-height bump in 0.5.5, this lets ~10+ event
+                    // rows show at once when populated. The empty state
+                    // takes the if-branch above and skips the ScrollView
+                    // entirely, so this cap is "free" when there are no
+                    // warnings to show.
+                    .frame(maxHeight: 240)
                 }
             }
 

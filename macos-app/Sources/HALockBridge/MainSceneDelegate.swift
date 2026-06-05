@@ -6,7 +6,11 @@ import SwiftUI
 final class MainSceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
 
-    private static let windowSize = CGSize(width: 440, height: 570)
+    // Height bumped from 570 to 720 in 0.5.5 — the "Lock Errors/Warnings"
+    // section added in 0.5.3 squeezed everything else when populated; the
+    // extra 150pt mostly benefits that section's internal ScrollView cap
+    // (see StatusView's lock-events frame(maxHeight:)). Width unchanged.
+    private static let windowSize = CGSize(width: 440, height: 720)
 
     func scene(
         _ scene: UIScene,

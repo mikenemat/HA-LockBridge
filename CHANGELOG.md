@@ -4,6 +4,19 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.5.5] — 2026-06-05
+
+### Changed
+- **Status window is taller (570pt → 720pt, +26%).** The "Lock
+  Errors/Warnings" section added in 0.5.3 squeezed every other section
+  when populated. The extra 150pt mostly benefits the warnings
+  section's internal ScrollView: its `frame(maxHeight:)` cap raised
+  from 140pt to 240pt, so ~10+ event rows are visible at once when
+  the bridge is actively reporting health events. Empty state stays
+  compact — the ScrollView is only rendered when there are events to
+  show. Width unchanged at 440pt.
+- `MARKETING_VERSION` 0.5.4 → 0.5.5, `CURRENT_PROJECT_VERSION` 6 → 7.
+
 ## [0.5.4] — 2026-06-05
 
 ### Fixed
