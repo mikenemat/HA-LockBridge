@@ -53,15 +53,23 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     }
 
     /// Backoff schedule for the background write retry loop. After exhausting
-    /// the array we cap at the last value. Cumulative: 1+2+4+8+8+8 ≈ 31s of
-    /// retry potential, which matches the 30s deadline. A reachability
-    /// recovery callback can fire the next retry immediately, ignoring the
-    /// scheduled delay.
-    private static let writeBackoffDelays: [Double] = [1.0, 2.0, 4.0, 8.0]
-    /// Background retry budget. Matches the `transitionWindow` in
+    /// the array we cap at the last value. Cumulative with the cap:
+    /// 1+2+4+8+16×5 ≈ 95s of retry potential, sized to fit inside the 90s
+    /// deadline below with a small slack margin. A reachability-recovery
+    /// callback can fire the next retry immediately, ignoring the scheduled
+    /// delay — so on the fast-recovery path the schedule is irrelevant.
+    private static let writeBackoffDelays: [Double] = [1.0, 2.0, 4.0, 8.0, 16.0]
+    /// Background retry budget. Matched to the `transitionWindow` in
     /// `deriveLifecycle` so HA's UI shows "locking"/"unlocking" for the
     /// entire retry window without prematurely settling.
-    private static let writeBudgetSeconds: TimeInterval = 30
+    ///
+    /// Bumped 30s → 90s in 0.5.6 after real-world testing showed locks
+    /// commonly take 30–60s to wake from deep sleep when prodded by
+    /// homed; the previous 30s budget was reverting commands that
+    /// would have succeeded at ~45s. 90s covers nearly all observed
+    /// wake-up paths while still capping unbounded delays for the
+    /// genuinely unreachable case.
+    private static let writeBudgetSeconds: TimeInterval = 90
 
     typealias StateObserver = (AccessoryState) -> Void
     typealias RemovalObserver = (UUID) -> Void

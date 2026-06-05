@@ -143,6 +143,54 @@ Click **Configure** on the discovered card → **Submit**. The bridge's window
 switches to a pairing request with **Approve / Deny** buttons. Click **Approve**.
 HA's flow advances to the device-selection screen with your ThorBolts pre-checked.
 
+## Performance
+
+**TL;DR** — when your locks are awake, commands from HA feel instant. When
+they're asleep, they can take up to ~90 seconds to wake up and respond.
+The bridge handles both cases transparently.
+
+HomeKit smart locks aggressively sleep their radios to preserve battery
+life. After roughly 5–30 minutes of inactivity (varies by manufacturer and
+firmware), they drop their connection to the HomeKit hub and only wake on
+direct stimulus — a HomeKey tap, a button press, or the hub poking them.
+
+This gives two very different latency profiles:
+
+| Lock state | What HA sees |
+|---|---|
+| **Awake** (recently used / actively connected) | Lock entity flips to `locking`/`unlocking` and reaches the final state in **under a second**. |
+| **Asleep** (idle for some minutes) | Lock entity flips to `locking`/`unlocking` **immediately** while the bridge wakes the lock in the background. Final state typically lands in **15–60 seconds**; the bridge retries for up to **90 seconds** total. |
+
+### What the bridge does on your behalf
+
+1. HA's command returns successfully in **~100ms** — the bridge accepts it
+   optimistically and shows the in-progress state in HA's UI right away.
+2. Behind the scenes, the bridge issues the underlying HomeKit write and
+   handles HomeKit's `accessoryNotReachable` responses (which is what the
+   home hub returns from cached state when it can't currently reach the
+   lock). It retries on an exponential backoff (1s, 2s, 4s, 8s, then
+   every 16s) for up to 90 seconds total.
+3. The moment the lock comes back online, the bridge fires the pending
+   write immediately — reachability-recovery short-circuits the backoff
+   timer so wake-up paths cost as little time as physically possible.
+4. If the retry budget elapses without success, the bridge silently
+   reverts the optimistic state — the lock entity flips back to its
+   last-known real state in HA's UI without throwing an error toast.
+   You can see these revert events on the bridge's *Stats & Debug* page
+   under "Lock Errors/Warnings."
+
+### Why this matters
+
+HomeKit's own UI (Apple Home app, HomeKey) does exactly this — when you
+tap a HomeKey on a sleeping lock you'll see a brief wait while the
+lock wakes up. The bridge mirrors that behaviour for HA, just with a
+slightly tighter budget than Apple's (Apple Home will wait longer).
+
+The 90-second budget is empirical: in real-world testing, locks woken
+from deep sleep typically respond in 30–60 seconds; 90 seconds covers
+nearly all observed wake-up paths while still capping unbounded delays
+for the genuinely unreachable case (lock physically off, hub gone, etc.).
+
 ## What survives without intervention
 
 - **Mac rename or IP change** → mDNS announces the new hostname for the same UUID; HA's stored entry auto-updates.

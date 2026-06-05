@@ -38,6 +38,31 @@ For each enabled lock:
 Devices are grouped by manufacturer in HA's *Devices* view: Sleekpoint
 Innovations (ThorBolt) under one group, August Home (Yale/August) under another.
 
+## Performance — what to expect
+
+HomeKit smart locks aggressively sleep their radios to preserve battery.
+This gives commands two very different latency profiles, and the
+integration is designed around both:
+
+- **Lock awake** (recently used / actively connected): the lock entity
+  flips to `locking`/`unlocking` and reaches the final state in **under
+  a second**. Feels instantaneous.
+- **Lock asleep** (idle for some minutes): the entity flips to
+  `locking`/`unlocking` **immediately**, but the actual physical
+  actuation can take **15–60 seconds** while the bridge wakes the lock.
+  The bridge retries for up to **90 seconds** total.
+
+You don't need to do anything to handle either case — the bridge accepts
+the command optimistically (returns 200 OK to HA in ~100ms regardless of
+lock state) and retries on an exponential backoff in the background. If
+the lock comes back online mid-retry, the bridge fires the pending write
+immediately. If the 90-second budget elapses without success, the entity
+silently reverts to its last-known real state — no error toast.
+
+Health events (retries, reachability gaps, reverts) are surfaced in the
+bridge's *Stats & Debug* page under "Lock Errors/Warnings" if you want
+to verify the bridge is healing things on your behalf.
+
 ## Reconfigure later
 
 The integration's **Configure** button (gear icon) lets you change which locks

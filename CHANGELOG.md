@@ -4,6 +4,32 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.5.6] — 2026-06-05
+
+### Changed
+- **Background-write retry budget 30s → 90s** (and the matched
+  `transitionWindow` in `deriveLifecycle` along with it). Real-world
+  testing showed sleeping locks commonly take 30–60s to wake when
+  prodded by `homed` — the previous 30s budget was reverting commands
+  that would have succeeded at ~45s. The new 90s window covers nearly
+  all observed wake-up paths while still capping unbounded delays for
+  the genuinely-unreachable case.
+- **Backoff schedule extended** from `[1, 2, 4, 8]`s to
+  `[1, 2, 4, 8, 16]`s capped, so cumulative retries (1+2+4+8+16×5 ≈
+  95s) fit inside the new deadline with slack. Reachability-recovery
+  callbacks still short-circuit the backoff timer on the fast path,
+  so the schedule only matters when the lock stays asleep.
+- `MARKETING_VERSION` 0.5.5 → 0.5.6, `CURRENT_PROJECT_VERSION` 7 → 8.
+
+### Added
+- **"Performance" section in the top-level README and the HA
+  integration README.** Sets expectations clearly: awake locks respond
+  in under a second; sleeping locks can take up to 90s while the
+  bridge handles wake-up retries transparently. Explains why (HomeKit
+  radios sleep aggressively for battery) and how the bridge handles
+  it (optimistic accept + background retry + silent revert on
+  exhaustion).
+
 ## [0.5.5] — 2026-06-05
 
 ### Changed

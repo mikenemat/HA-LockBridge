@@ -190,11 +190,13 @@ func deriveLifecycle(
     reachable: Bool,
     lastTargetChange: Date?,
     now: Date,
-    // Extended from 15s → 30s to match the async-accept retry budget in
-    // HomeKitMonitor.setLockState. During the background retry window we
-    // want HA's UI to keep showing "locking"/"unlocking" rather than
-    // reverting to a stable state derived from the stale current_state.
-    transitionWindow: TimeInterval = 30
+    // Matched to `writeBudgetSeconds` in HomeKitMonitor.setLockState so
+    // HA's UI keeps showing "locking"/"unlocking" for the entire retry
+    // window rather than reverting to a stable state derived from the
+    // stale current_state. Bumped 15s → 30s → 90s in lockstep with the
+    // retry budget; see the comment on writeBudgetSeconds for why
+    // 90s covers most real-world deep-sleep wake-up paths.
+    transitionWindow: TimeInterval = 90
 ) -> String {
     if current == 2 { return "jammed" }
     guard let c = current else { return "unknown" }
