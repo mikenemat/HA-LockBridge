@@ -58,22 +58,6 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     /// attempt + 2 retries; combined with the backoff below, ~95s of
     /// real-world wait before we give up and commit fallback.
     private static let maxSerialAttempts = 3
-    /// One-shot callbacks waiting for an accessory to flip
-    /// HMAccessory.isReachable back to true. `setLockState`'s retry path
-    /// registers itself here so that a reachability-recovery signal can
-    /// trigger an immediate retry instead of waiting out a fixed backoff.
-    /// Fired (and cleared) from `accessoryDidUpdateReachability`.
-    private var reachabilityRecoveryWaiters: [UUID: [() -> Void]] = [:]
-
-    /// Heap-allocated retry state shared between the outer write loop and
-    /// the per-attempt callbacks. Reference semantics so the timer and the
-    /// reachability callback can each read/mutate `completed`/`triggered`
-    /// without races.
-    private final class WriteRetryContext {
-        var completed = false
-        var triggered = false
-        var attempt = 0
-    }
 
     /// Reverse map from the *wire* ID (the stable hash we publish to HA) to
     /// the underlying HMAccessory.uniqueIdentifier. Populated by
@@ -148,23 +132,8 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     }
 
     /// Set lock target state. Completion called on main thread.
-    ///
-    /// On a happy write the completion fires once writeValue's HomeKit
-    /// callback returns. On `HMError Code=82` ("accessory not reachable",
-    /// usually a `homed`-cached negative result that flips back once the
-    /// HomeKit hub re-establishes contact with the lock) the call is
-    /// retried up to 5 times within a 13s budget. Each retry races a
-    /// backoff timer against a one-shot reachability-recovery wake — so
-    /// the moment Apple's framework signals the lock is back, we retry
-    /// in milliseconds instead of waiting out the rest of the backoff.
-    ///
-    /// Retry budget is sized so the worst case (~13s) still fits inside
-    /// the HA integration's HTTP_TIMEOUT (15s in `client.py`).
-    ///
-    /// On final exhaustion the completion is `.unreachable`, which the
-    /// bridge surfaces as HTTP 503 — HA renders that as a clean "lock
-    /// unreachable" rather than the stack-traced 502 a raw `.homekitError`
-    /// would generate.
+    /// Returns immediately after HomeKit acknowledges the write; the current_state
+    /// update will arrive separately via the observer pipeline.
     func setLockState(id: UUID, target: Int, completion: @escaping (SetLockResult) -> Void) {
         // Resolve the wire ID HA sent us to the HMAccessory UUID. See the
         // comment on `wireIDToHMUUID` for why this exists.
@@ -180,96 +149,28 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             completion(.homekitError("lock characteristic missing")); return
         }
 
-        let ctx = WriteRetryContext()
-        let deadline = Date().addingTimeInterval(13.0)
-        // Backoff between blind retries. Each retry also subscribes to the
-        // reachability-recovery channel — whichever fires first wins, so
-        // these are upper bounds, not floors.
-        let backoffs: [TimeInterval] = [0.5, 1.0, 2.0, 3.0, 5.0]
+        let timeoutWork = DispatchWorkItem { completion(.timeout) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: timeoutWork)
 
-        // Outer safety net in case writeValue never calls back at all.
-        let outerTimeout = DispatchWorkItem {
-            if ctx.completed { return }
-            ctx.completed = true
-            completion(.timeout)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 15.0, execute: outerTimeout)
-
-        func attemptWrite() {
-            targetChar.writeValue(NSNumber(value: target)) { [weak self] error in
-                guard let self = self, !ctx.completed else { return }
-
-                if let error = error {
-                    let nsError = error as NSError
-                    let isNotReachableHME = nsError.domain == HMErrorDomain && nsError.code == 82
-
-                    if !isNotReachableHME {
-                        ctx.completed = true
-                        outerTimeout.cancel()
-                        completion(.homekitError(error.localizedDescription))
-                        return
-                    }
-
-                    // HMError 82 = "accessory not reachable" (homed cache).
-                    // Retry if we still have budget left.
-                    if Date() >= deadline {
-                        ctx.completed = true
-                        outerTimeout.cancel()
-                        self.log("Lock \(accessory.name): write giving up after \(ctx.attempt + 1) attempts over ~\(Int(deadline.timeIntervalSinceNow + 13))s — homed kept reporting unreachable; returning .unreachable to HA")
-                        completion(.unreachable)
-                        return
-                    }
-
-                    ctx.attempt += 1
-                    ctx.triggered = false
-                    let delay = backoffs[min(ctx.attempt - 1, backoffs.count - 1)]
-                    self.log("Lock \(accessory.name): write rejected as not-reachable (attempt \(ctx.attempt), retry in up to \(delay)s or sooner on reachability change)")
-
-                    let fire: () -> Void = {
-                        if ctx.completed || ctx.triggered { return }
-                        ctx.triggered = true
-                        attemptWrite()
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                        fire()
-                    }
-                    self.waitForReachabilityRecovery(of: hmID) { [weak self] in
-                        self?.log("Lock \(accessory.name): reachability recovered mid-retry; firing write immediately")
-                        fire()
-                    }
-                    return
-                }
-
-                // Success path. Mark the target change so a subsequent state
-                // recompute returns the right `lifecycle_state`
-                // ("locking"/"unlocking") even if our HMAccessoryDelegate
-                // hasn't received the target update yet.
-                ctx.completed = true
-                outerTimeout.cancel()
-                self.lastTargetChange[hmID] = Date()
-                self.recomputeAndPublish(for: accessory, reason: "post-write")
-                let state = self.stateStore[hmID] ?? AccessoryState.from(
-                    accessory: accessory,
-                    info: self.infoCache[hmID] ?? [:],
-                    lastTargetChange: self.lastTargetChange[hmID]
-                )
-                completion(.ok(state))
+        targetChar.writeValue(NSNumber(value: target)) { [weak self] error in
+            guard !timeoutWork.isCancelled else { return }
+            timeoutWork.cancel()
+            if let error = error {
+                completion(.homekitError(error.localizedDescription))
+                return
             }
+            // Mark the target change so a subsequent state recompute returns
+            // the right `lifecycle_state` ("locking"/"unlocking") even if our
+            // HMAccessoryDelegate hasn't received the target update yet.
+            self?.lastTargetChange[hmID] = Date()
+            self?.recomputeAndPublish(for: accessory, reason: "post-write")
+            let state = self?.stateStore[hmID] ?? AccessoryState.from(
+                accessory: accessory,
+                info: self?.infoCache[hmID] ?? [:],
+                lastTargetChange: self?.lastTargetChange[hmID]
+            )
+            completion(.ok(state))
         }
-
-        attemptWrite()
-    }
-
-    /// Register a one-shot callback fired the next time the given
-    /// accessory transitions to `isReachable == true`. Used by
-    /// setLockState's retry path. Callbacks accumulate per accessory and
-    /// are all fired (in registration order) by
-    /// `accessoryDidUpdateReachability` on the next reachable=true edge.
-    /// Callbacks that fire after their owning write has already completed
-    /// observe `ctx.completed` and self-bail, so stale entries are
-    /// harmless even if they sit unfired.
-    private func waitForReachabilityRecovery(of accessoryID: UUID, callback: @escaping () -> Void) {
-        reachabilityRecoveryWaiters[accessoryID, default: []].append(callback)
     }
 
     // MARK: - HMHomeManagerDelegate
@@ -578,17 +479,6 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             subscribeAndRead(accessory)
         }
         recomputeAndPublish(for: accessory, reason: "reachability")
-
-        // Wake any setLockState retries that were parked waiting for
-        // this accessory to come back online. Drained on every
-        // reachable=true edge; the callbacks self-bail if their write
-        // has already completed via the parallel backoff timer.
-        if accessory.isReachable {
-            let waiters = reachabilityRecoveryWaiters.removeValue(forKey: accessory.uniqueIdentifier) ?? []
-            for waiter in waiters {
-                waiter()
-            }
-        }
     }
 
     func accessoryDidUpdateName(_ accessory: HMAccessory) {

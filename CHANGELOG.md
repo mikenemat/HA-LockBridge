@@ -4,30 +4,6 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
-## [0.5.2] — 2026-06-05
-
-### Added
-- **Retry-with-reachability-wake on HomeKit "not reachable" errors.**
-  `homed` sometimes serves cached `HMErrorDomain Code=82` responses
-  during transient hub↔lock connectivity blips. Previously the bridge
-  passed those straight back as HTTP 502 — the user's lock command
-  failed in ~4ms even though the lock was about to come back online.
-  Now `setLockState` retries the write on Code=82 within a 13s budget,
-  racing a backoff timer (0.5s, 1s, 2s, 3s, 5s) against a one-shot
-  subscription to `accessoryDidUpdateReachability` for that
-  accessory — whichever fires first wins, so the moment Apple's
-  framework signals reachable=true we retry in milliseconds. On
-  final budget exhaustion the bridge returns `.unreachable` (HTTP
-  503), which HA renders as a clean "lock unreachable" rather than
-  a stack-traced 502.
-- HA `client.py` `HTTP_TIMEOUT` raised from 10s to 15s so it doesn't
-  give up on the POST while the bridge is still retrying.
-
-### Changed
-- `MARKETING_VERSION` 0.5.1 → 0.5.2, `CURRENT_PROJECT_VERSION` 3 → 4.
-- HA integration `manifest.json` `version` 0.5.0 → 0.5.2 (was already
-  one minor behind; this catches it up).
-
 ## [0.5.1] — 2026-06-05
 
 ### Fixed

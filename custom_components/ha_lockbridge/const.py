@@ -26,12 +26,7 @@ WS_RECONNECT_MAX = 60.0
 WS_RECEIVE_TIMEOUT = 45.0  # bridge pings every 15s, closes on 30s of silence
 
 # HTTP request timeout for snapshot/commands.
-# Sized to leave the bridge headroom for its internal retry loop on
-# `HMErrorDomain Code=82` ("accessory not reachable", typically a transient
-# `homed` cache state that flips back when the HomeKit hub re-establishes
-# contact with the lock). The bridge's setLockState budget is 13s; this
-# 15s timeout gives 2s of HTTP round-trip slack.
-HTTP_TIMEOUT = 15.0
+HTTP_TIMEOUT = 10.0
 
 PLATFORMS = ["lock", "sensor", "binary_sensor"]
 
