@@ -35,6 +35,29 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     private var stateStore: [UUID: AccessoryState] = [:]
     private var lastTargetChange: [UUID: Date] = [:]
     private var observers: [(token: ObserverToken, onState: StateObserver, onRemoved: RemovalObserver)] = []
+    /// Home name per accessory, populated during enumeration. Needed by the
+    /// AccessoryIdentityCache so it can match by (homeName, accessoryName)
+    /// after a re-sign rotates HMAccessory.uniqueIdentifier.
+    private var homeNameForAccessory: [UUID: String] = [:]
+    /// Persistent identity pinning. Injected from AppDelegate before
+    /// `start()` so that the first `recomputeAndPublish` for each accessory
+    /// already routes through the cache. Optional only to keep tests +
+    /// CLI-mode paths buildable without one — real launches always set it.
+    var identityCache: AccessoryIdentityCache?
+    /// Accessories whose SerialNumber characteristic exists but failed all
+    /// retry attempts. Treated as "no serial available, ever" — the cache
+    /// commits the fallback HMAccessory.uniqueIdentifier instead of
+    /// waiting forever. The (home, name) secondary index in the cache
+    /// then keeps that wireID stable across re-signs.
+    private var serialReadExhausted: Set<UUID> = []
+    /// Per-accessory retry counter for the SerialNumber characteristic.
+    /// Reset to 0 on successful read so future reachability transitions
+    /// don't inherit stale state.
+    private var serialAttempts: [UUID: Int] = [:]
+    /// Max read attempts before pinning the fallback wireID. 3 = initial
+    /// attempt + 2 retries; combined with the backoff below, ~95s of
+    /// real-world wait before we give up and commit fallback.
+    private static let maxSerialAttempts = 3
 
     /// Reverse map from the *wire* ID (the stable hash we publish to HA) to
     /// the underlying HMAccessory.uniqueIdentifier. Populated by
@@ -176,7 +199,7 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             home.delegate = self  // so we get accessory add/remove events
             log("Home: \(home.name) — \(home.accessories.count) accessories")
             for accessory in home.accessories {
-                considerAccessory(accessory)
+                considerAccessory(accessory, in: home)
             }
         }
         if manager.homes.isEmpty {
@@ -187,7 +210,7 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     func homeManager(_ manager: HMHomeManager, didAdd home: HMHome) {
         log("Home added: \(home.name)")
         home.delegate = self
-        for accessory in home.accessories { considerAccessory(accessory) }
+        for accessory in home.accessories { considerAccessory(accessory, in: home) }
     }
 
     func homeManager(_ manager: HMHomeManager, didRemove home: HMHome) {
@@ -204,7 +227,7 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     /// (or any other lock) appears in the bridge without restarting it.
     func home(_ home: HMHome, didAdd accessory: HMAccessory) {
         log("Accessory added to home \(home.name): \(accessory.name)")
-        considerAccessory(accessory)
+        considerAccessory(accessory, in: home)
     }
 
     func home(_ home: HMHome, didRemove accessory: HMAccessory) {
@@ -223,6 +246,7 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         stateStore.removeValue(forKey: id)
         infoCache.removeValue(forKey: id)
         lastTargetChange.removeValue(forKey: id)
+        homeNameForAccessory.removeValue(forKey: id)
         for o in observers {
             o.onRemoved(removedWireID)
         }
@@ -230,14 +254,18 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
 
     // MARK: - Accessory discovery
 
-    private func considerAccessory(_ accessory: HMAccessory) {
+    private func considerAccessory(_ accessory: HMAccessory, in home: HMHome) {
         let lockServices = accessory.services.filter { $0.serviceType == HMServiceTypeLockMechanism }
         guard !lockServices.isEmpty else { return }
+
+        // Record home membership even on re-discovery so a fresh
+        // recomputeAndPublish always has it.
+        homeNameForAccessory[accessory.uniqueIdentifier] = home.name
 
         if trackedAccessories[accessory.uniqueIdentifier] != nil { return }
         trackedAccessories[accessory.uniqueIdentifier] = accessory
 
-        log("Lock discovered: \(accessory.name) [\(accessory.uniqueIdentifier.uuidString)] reachable=\(accessory.isReachable)")
+        log("Lock discovered: \(accessory.name) [\(accessory.uniqueIdentifier.uuidString)] home=\(home.name) reachable=\(accessory.isReachable)")
         // Log manufacturer + model from the synchronous HMAccessory
         // properties so the discovery trace shows accessory identity even
         // when reachable=false. (HomeKit eagerly caches these regardless
@@ -309,21 +337,61 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     }
 
     private func readInfo(_ characteristic: HMCharacteristic, accessory: HMAccessory) {
+        let id = accessory.uniqueIdentifier
+        let isSerial = characteristic.characteristicType == HMCharacteristicTypeSerialNumber
+
+        // Don't waste cycles re-attempting a serial read we've already
+        // given up on — the cache has the fallback wireID pinned and a
+        // late-arriving real serial wouldn't change it anyway.
+        if isSerial && serialReadExhausted.contains(id) {
+            return
+        }
+
         characteristic.readValue { [weak self] error in
             guard let self = self else { return }
+            let key = self.shortType(characteristic.characteristicType)
+
             if let error = error {
-                self.log("readValue (info) failed for \(self.shortType(characteristic.characteristicType)) on \(accessory.name): \(error.localizedDescription)")
+                let attempt = (self.serialAttempts[id] ?? 0) + 1
+                self.log("readValue (info) failed for \(key) on \(accessory.name) [attempt \(attempt)\(isSerial ? "/\(Self.maxSerialAttempts)" : "")]: \(error.localizedDescription)")
+                if !isSerial {
+                    return  // Non-serial reads aren't retried; their values aren't load-bearing for wire-ID stability.
+                }
+                self.serialAttempts[id] = attempt
+                if attempt < Self.maxSerialAttempts {
+                    // Backoff: 5s after first failure, 30s after second.
+                    let backoffs: [Double] = [5, 30]
+                    let delay = backoffs[min(attempt - 1, backoffs.count - 1)]
+                    self.log("  Retrying serial_number read for \(accessory.name) in \(Int(delay))s")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                        self?.readInfo(characteristic, accessory: accessory)
+                    }
+                } else {
+                    // All retries exhausted. Mark this accessory as
+                    // "serial unavailable for the rest of this run" and
+                    // force a recomputeAndPublish so the cache commits the
+                    // fallback HMAccessory.uniqueIdentifier as the wireID.
+                    // The (home, name) lookup in AccessoryIdentityCache
+                    // keeps that wireID stable across re-signs even though
+                    // HMAccessory.uniqueIdentifier itself rotates per-app.
+                    self.log("  serial_number for \(accessory.name) failed all \(Self.maxSerialAttempts) attempts; pinning HMAccessory.uniqueIdentifier as fallback wireID.")
+                    self.serialReadExhausted.insert(id)
+                    self.recomputeAndPublish(for: accessory, reason: "serial-giveup")
+                }
                 return
             }
+
             guard let value = characteristic.value as? String else { return }
-            let key = self.shortType(characteristic.characteristicType)
-            self.infoCache[accessory.uniqueIdentifier, default: [:]][key] = value
+            self.infoCache[id, default: [:]][key] = value
             // Only serial_number arrives via this path now; manufacturer +
             // model are logged synchronously at discovery time in
             // considerAccessory(). Keep the same log shape for grep
             // continuity in dashboards / debug scripts.
             if key == "serial_number" {
                 self.log("  \(accessory.name): \(key)=\(value)")
+                // Reset retry state on success — if reachability flaps and
+                // we end up re-subscribing later, the counter starts fresh.
+                self.serialAttempts.removeValue(forKey: id)
             }
             self.recomputeAndPublish(for: accessory, reason: "info:\(key)")
         }
@@ -443,18 +511,84 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             lastTargetChange[id] = Date()
         }
 
-        let newState = AccessoryState.from(
+        let computed = AccessoryState.from(
             accessory: accessory,
             info: info,
             lastTargetChange: lastTargetChange[id]
         )
+
+        // Pin the wire ID via the persistent identity cache so it stays
+        // constant across re-signs, reachability flapping, and async info
+        // reads completing in different orders. Three cases for *when*
+        // we're willing to commit a wire ID to the cache:
+        //
+        //   1. Serial is already in `info` → the SHA-hash ID is the
+        //      best-possible identifier (content-addressed, never rotates).
+        //      Pin it. This is the path we *want* every accessory to take.
+        //
+        //   2. The accessory exposes no SerialNumber characteristic at all
+        //      → no read is coming, ever. The fallback HMAccessory UUID is
+        //      all we'll ever have. Pin it; the cache's (home, name)
+        //      secondary index keeps it stable across re-signs even though
+        //      HMAccessory.uniqueIdentifier itself rotates.
+        //
+        //   3. SerialNumber characteristic exists but the async read hasn't
+        //      returned yet → don't commit. If the cache already has a
+        //      record from a previous run, honor it (likely already the
+        //      serial-hash). Otherwise publish the computed fallback ID
+        //      WITHOUT pinning, so the next recomputeAndPublish (after the
+        //      read completes) gets to write the proper serial-hash to
+        //      the cache.
+        //
+        // This avoids the bug where the "initial" publish raced ahead of
+        // the serial read and pinned a fallback UUID for accessories whose
+        // proper ID would have been a stable serial-hash, then watched HA's
+        // entity registry orphan everything on the next re-sign.
+        let pinnedID: String
+        if let cache = identityCache {
+            let hasSerialNow = !(info["serial_number"]?.isEmpty ?? true)
+            let hasSerialChar = accessory.services.contains { svc in
+                svc.characteristics.contains { ch in
+                    ch.characteristicType == HMCharacteristicTypeSerialNumber
+                }
+            }
+            // serialReadExhausted = retries have run their course; treat the
+            // accessory as if it never had a SerialNumber characteristic
+            // (commit the current fallback HMAccessory.uniqueIdentifier to
+            // the cache so future re-signs use (home, name) lookup to keep
+            // it stable).
+            let serialGivenUp = serialReadExhausted.contains(id)
+            if hasSerialNow || !hasSerialChar || serialGivenUp {
+                pinnedID = cache.wireID(
+                    forHMUUID: id.uuidString,
+                    accessoryName: accessory.name,
+                    homeName: homeNameForAccessory[id],
+                    computeIfMissing: { computed.id }
+                )
+            } else if let existing = cache.peekWireID(
+                forHMUUID: id.uuidString,
+                accessoryName: accessory.name,
+                homeName: homeNameForAccessory[id]
+            ) {
+                pinnedID = existing
+            } else {
+                // Read pending, no cache entry — publish fallback transiently,
+                // don't commit. The next publish (success or serial-giveup)
+                // will pin the right wireID.
+                pinnedID = computed.id
+            }
+        } else {
+            pinnedID = computed.id
+        }
+        let newState = computed.with(id: pinnedID)
+
         let prior = stateStore[id]
         stateStore[id] = newState
 
-        // Refresh the reverse map every publish — the wire ID can change at
-        // runtime when initial info reads complete (e.g. SerialNumber arrives
-        // after manufacturer/model), shifting from the fallback HM UUID to a
-        // stable hash. Always overwriting is cheap and correct.
+        // Refresh the reverse map every publish. With the identity cache in
+        // place the wire ID rarely changes after first sight, but the map
+        // still needs to be populated initially so /accessories/{id}/state
+        // commands route correctly.
         if let wireUUID = UUID(uuidString: newState.id) {
             wireIDToHMUUID[wireUUID] = id
         }

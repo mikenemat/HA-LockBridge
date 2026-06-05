@@ -34,6 +34,31 @@ struct AccessoryState: Codable, Equatable {
         case updatedAt = "updated_at"
     }
 
+    /// Return a copy with `id` replaced. Used by HomeKitMonitor to pin the
+    /// wire ID from AccessoryIdentityCache after construction — the cache
+    /// holds the immutable wire ID chosen at first sight, which may differ
+    /// from what `stableID()` would compute on this run if the accessory's
+    /// manufacturer/model/serial weren't all available the first time.
+    func with(id newID: String) -> AccessoryState {
+        return AccessoryState(
+            id: newID,
+            name: name,
+            manufacturer: manufacturer,
+            model: model,
+            firmwareVersion: firmwareVersion,
+            serialNumber: serialNumber,
+            reachable: reachable,
+            currentState: currentState,
+            currentStateRaw: currentStateRaw,
+            targetState: targetState,
+            targetStateRaw: targetStateRaw,
+            lifecycleState: lifecycleState,
+            batteryLevel: batteryLevel,
+            lowBattery: lowBattery,
+            updatedAt: updatedAt
+        )
+    }
+
     /// Equality used for dedupe — ignores `updatedAt`.
     func equalsIgnoringTimestamp(_ other: AccessoryState) -> Bool {
         return id == other.id

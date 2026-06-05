@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Export options for Mac App Store / TestFlight upload.
+  Used by `xcodebuild -exportArchive` to produce the .pkg ready for
+  App Store Connect ingest. Mirrors what Xcode's Organizer would
+  generate for "Distribute App → App Store Connect".
+
+  destination=upload is intentionally NOT set here so the export is a
+  local .pkg only — that lets you review the bundle and upload via
+  Transporter or `xcrun notarytool` at your own pace, rather than
+  silently shipping to App Store Connect at exportArchive time.
+-->
+<plist version="1.0">
+<dict>
+    <key>method</key>
+    <string>app-store</string>
+    <key>destination</key>
+    <string>export</string>
+    <key>uploadSymbols</key>
+    <true/>
+    <key>uploadBitcode</key>
+    <false/>
+    <key>compileBitcode</key>
+    <false/>
+    <key>signingStyle</key>
+    <string>automatic</string>
+    <key>generateAppStoreInformation</key>
+    <false/>
+</dict>
+</plist>

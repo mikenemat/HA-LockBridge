@@ -4,6 +4,61 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.5.1] — 2026-06-05
+
+### Fixed
+- **Wire-IDs survive re-signs.** HA was orphaning lock entities every time
+  the bridge got re-signed (free-tier 7-day cert rotation, paid Developer
+  Program profile renewal, bundle-ID changes, etc.) because
+  `HMAccessory.uniqueIdentifier` is per-app and rotates on every signing
+  identity change, and any accessory whose SerialNumber characteristic
+  hadn't been read in time would publish that rotating UUID as its wire
+  ID. The new `AccessoryIdentityCache` (persisted to
+  `accessory-identity.json` next to `config.json`) pins each lock's wire
+  ID at first sight and keeps it stable across re-signs via a
+  `(home, accessory name)` secondary index — after a re-sign the cache
+  recognizes the lock under its rotated HMAccessory UUID and reuses the
+  previously-pinned wire ID.
+- **First publish doesn't pin a temporary fallback.** `recomputeAndPublish`
+  now defers committing a wire ID to the cache until the SerialNumber
+  characteristic has either been read successfully or has been
+  demonstrated unreadable after retries. Previously the "initial" publish
+  raced ahead of the async SerialNumber read and pinned the fallback
+  HMAccessory UUID even for locks whose proper content-addressed
+  serial-hash ID would have arrived seconds later.
+- **SerialNumber reads retry on failure.** HomeKit reads of
+  `HMCharacteristicTypeSerialNumber` now retry up to 3 attempts with 5s/30s
+  backoff. After all attempts fail the cache pins the current
+  HMAccessory.uniqueIdentifier as the wire ID, and the (home, name)
+  index keeps it stable across future re-signs — so even locks whose
+  serial read fails permanently end up with a re-sign-safe identifier.
+- **Blank ghost window after the briefStatus countdown.** UIKit's
+  `UIWindow.isHidden = true` doesn't reliably propagate to the backing
+  NSWindow on Catalyst, so on first start the briefStatus countdown
+  would finish and leave a window showing only the system-painted title
+  bar (no SwiftUI content) instead of disappearing. The orderOut path
+  now filters NSWindow vs NSPanel by class rather than relying on a
+  capture that raced Catalyst's UIWindow → NSWindow materialization.
+- **Spell-check / language-picker popups on Close stay gone.** The new
+  class-based filter (skip NSPanels) achieves the same goal as the
+  previous explicit-capture approach without the capture race.
+- **Reset Pairing forcibly closes WebSockets.** Token auth runs only at
+  the WS upgrade handshake; HA's WS connection used to outlive its
+  revoked token, making Reset Pairing feel like a no-op until the app
+  was restarted. Now the WS drops immediately, HA's client surfaces the
+  disconnect, and re-pairing works without a restart.
+
+### Added
+- `macos-app/ExportOptions.plist` for `xcodebuild -exportArchive` with the
+  Mac App Store distribution method. Generates a local `.pkg` for review
+  + upload via Transporter or `xcrun notarytool` rather than auto-shipping
+  to App Store Connect.
+- `schemes` block in `macos-app/project.yml` so `xcodegen generate`
+  produces a shared scheme without needing a prior Xcode-GUI open.
+
+### Changed
+- `MARKETING_VERSION` 0.5.0 → 0.5.1, `CURRENT_PROJECT_VERSION` 2 → 3.
+
 ## [0.5.0] — 2026-05-28
 
 ### Changed

@@ -181,6 +181,22 @@ final class BridgeServer {
         }
     }
 
+    /// Forcibly close every live WebSocket. Called by AppDelegate.performReset
+    /// after the token store is wiped, so HA's authenticated WS doesn't
+    /// outlive the token it was upgraded with. HA's client will see the
+    /// disconnect immediately, attempt to reconnect with the old (now
+    /// revoked) token, get 401s, and surface the connection loss in HA's
+    /// UI — at which point the user can re-pair without restarting the
+    /// bridge. Snapshots wsConnections first because the underlying
+    /// channel-close path calls back into unregisterWS, which mutates
+    /// the array.
+    func closeAllWSConnections() {
+        let snapshot = wsConnections
+        for conn in snapshot {
+            conn.closeFromExternal()
+        }
+    }
+
     /// Snapshot of remote IPs for every currently-connected WebSocket client.
     /// Call from the main thread — that's the same thread `wsConnections` is
     /// mutated on (see `registerWS` / `unregisterWS`), so no extra locking
@@ -360,6 +376,30 @@ final class WSConnection: ChannelInboundHandler {
             buffer.writeBytes(data)
             let frame = WebSocketFrame(fin: true, opcode: .text, data: buffer)
             channel.writeAndFlush(frame, promise: nil)
+        }
+        if channel.eventLoop.inEventLoop {
+            work()
+        } else {
+            channel.eventLoop.execute(work)
+        }
+    }
+
+    /// Send a CLOSE frame and tear down the channel. Used by
+    /// `BridgeServer.closeAllWSConnections()` on Reset Pairing — without
+    /// this, HA's already-upgraded WebSocket stays alive after its bearer
+    /// token is revoked from the store (token auth runs only at upgrade
+    /// time, not per-frame), so the reset has no visible effect until the
+    /// app is restarted. Hops to the channel's event loop, same pattern
+    /// as `send(envelope:)`.
+    func closeFromExternal(code: WebSocketErrorCode = .normalClosure) {
+        guard let channel = channel else { return }
+        let work: () -> Void = {
+            var data = channel.allocator.buffer(capacity: 2)
+            data.write(webSocketErrorCode: code)
+            let frame = WebSocketFrame(fin: true, opcode: .connectionClose, data: data)
+            channel.writeAndFlush(frame).whenComplete { _ in
+                channel.close(promise: nil)
+            }
         }
         if channel.eventLoop.inEventLoop {
             work()

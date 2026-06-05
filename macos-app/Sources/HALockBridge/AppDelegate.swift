@@ -65,6 +65,14 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     /// bridge should be headless. Captured in MainSceneDelegate and
     /// neutralized below.
     var knownRogueNSWindows: [NSObject] = []
+    // (Previously we tracked `ourNSWindow` here and orderOut'd only that
+    // handle in hide. The synchronous capture race after `makeKeyAndVisible`
+    // sometimes returned nil on first show, leaving hide a no-op and the
+    // user seeing a ghost window with just the title bar after the
+    // briefStatus countdown. Now we filter by NSWindow vs NSPanel class
+    // instead — system text-services use NSPanel, our content windows
+    // (and Catalyst rogues) are plain NSWindow, so the class check cleanly
+    // separates them without any capture race.)
 
     func application(
         _ application: UIApplication,
@@ -97,6 +105,13 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             .sink { [weak self] _ in self?.refreshWindowVisibility() }
 
         let m = HomeKitMonitor()
+        // Inject the persistent identity cache BEFORE start() so the very
+        // first recomputeAndPublish for each accessory routes through it.
+        // The cache pins wire IDs across re-signs (HMAccessory.uniqueIdentifier
+        // is per-app and rotates), which is the only thing keeping HA's
+        // entity registry from orphaning every lock without a usable
+        // SerialNumber characteristic.
+        m.identityCache = AccessoryIdentityCache(path: AccessoryIdentityCache.defaultPath())
         let cliCommand = Self.parseCommand(from: CommandLine.arguments)
         if let cmd = cliCommand {
             m.setPendingCommand(cmd)
@@ -286,6 +301,13 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         for token in tokens {
             store.removeToken(token)
         }
+        // Forcibly close any live WS connections. Token auth runs only at
+        // WS-upgrade time, so HA's already-upgraded socket would otherwise
+        // outlive the tokens we just revoked, and Reset Pairing would
+        // appear to do nothing until the user restarted the app. Now the
+        // socket drops immediately; HA's client surfaces the disconnect
+        // and the user can re-pair without a restart.
+        server?.closeAllWSConnections()
         // Hide the confirm dialog and re-enter "waiting" state if no clients left
         Task { @MainActor in
             self.statusVM?.pairedCount = 0
@@ -346,28 +368,42 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             setAppKitActivationPolicy(.accessory)
             // UIWindow.isHidden=true does NOT reliably hide the backing
             // NSWindow on Catalyst — UIKit→AppKit bridging is one-way and
-            // patchy. The user-visible symptom: the window stays on screen
-            // with empty middle content ("blank HA-LockBridge window") even
-            // though we asked UIKit to hide it. Reach through to AppKit and
-            // orderOut every NSWindow; the next show goes through
-            // makeKeyAndVisible which brings our window back without
-            // affecting the now-orderOut'd rogues.
-            orderOutAllNSWindows()
+            // patchy. If we stop here the user sees a ghost window with
+            // only the system-painted title bar after the briefStatus
+            // countdown. So reach through to AppKit and orderOut every
+            // NSWindow that isn't an NSPanel — see
+            // `orderOutOurContentWindows` for why the NSPanel filter
+            // matters for the spell-check / language picker bug.
+            orderOutOurContentWindows()
             windowWasHidden = true
         }
     }
 
-    /// orderOut every NSWindow in the app via the Obj-C bridge. Used on
-    /// every hide to compensate for Catalyst not propagating
-    /// UIWindow.isHidden to the backing NSWindow.
-    private func orderOutAllNSWindows() {
+    /// orderOut every NSWindow in `NSApp.windows` that isn't an NSPanel.
+    ///
+    /// NSPanel is the parent class for system-owned text-services panels:
+    /// spell-check, grammar, language picker, dictation, etc. macOS
+    /// occasionally parks those inside an app's window list; if we
+    /// orderOut them indiscriminately, the system surfaces a "configure
+    /// language" prompt to resolve the orphaned input session — that's
+    /// the source of the unkillable language-picker popups we hit
+    /// earlier. Filtering on `isKind(of: NSPanel)` leaves those alone.
+    ///
+    /// Plain NSWindow instances are either ours (our SwiftUI window's
+    /// backing NSWindow) or Catalyst-auto-spawned rogue blanks — both
+    /// safe to orderOut.
+    private func orderOutOurContentWindows() {
         guard let cls = NSClassFromString("NSApplication") else { return }
         guard let nsApp = (cls as AnyObject)
             .perform(NSSelectorFromString("sharedApplication"))?
             .takeUnretainedValue() as? NSObject else { return }
         guard let windows = nsApp.value(forKey: "windows") as? [NSObject] else { return }
+        let panelCls = NSClassFromString("NSPanel")
         let sel = NSSelectorFromString("orderOut:")
         for w in windows where w.responds(to: sel) {
+            if let panelCls = panelCls, w.isKind(of: panelCls) {
+                continue
+            }
             _ = w.perform(sel, with: nil)
         }
     }
