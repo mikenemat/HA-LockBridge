@@ -4,6 +4,53 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.5.2] — 2026-06-05
+
+### Fixed
+- **Transient "lock unreachable" failures no longer surface as 502 errors in
+  HA.** Apple's `homed` daemon returns `HMError 82 (accessory not reachable)`
+  from a cached probe state when the HomeKit hub has briefly lost contact
+  with the lock; in practice the underlying radio link recovers within
+  seconds to ~half a minute. Previously the bridge synchronously waited
+  on the write and surfaced the failure to HA as a 502, leaving the lock
+  entity in an error state that required user retry. The bridge now
+  accepts the command *immediately* with an optimistic
+  `lifecycle_state = "locking"/"unlocking"`, returns 200 OK to HA in
+  ~100ms so the UI flips to the "in-progress" indicator without
+  perceptible delay, and retries the underlying HomeKit write in the
+  background for up to 30 seconds. On success the real `current_state`
+  arrives via the existing observer pipeline; on exhaustion the
+  optimistic state is silently reverted (no error toast — the lock UI
+  flips back to its last-known state). A reachability-recovery callback
+  fires the next retry immediately when HomeKit's `isReachable` flips
+  back to true, avoiding wasted backoff wait on the fast-recovery path.
+- **External lock operations during a pending retry cancel the retry.**
+  If someone taps a HomeKey, manually operates the lock, or another
+  HomeKit controller successfully writes the same target while our
+  background retry is still running, the bridge cancels the retry as
+  soon as the live `current_state` matches the pending target. No
+  competing writes to homed.
+- **Commands accepted even when `accessory.isReachable == false`.** The
+  property's value can be stale (cached from the last probe), and the
+  underlying link often recovers within the retry window. The previous
+  synchronous early-out short-circuited too aggressively.
+
+### Changed
+- `transitionWindow` in `deriveLifecycle` 15s → 30s, matching the new
+  background write retry budget. HA's UI shows "locking"/"unlocking" for
+  the entire retry window without prematurely settling.
+- `MARKETING_VERSION` 0.5.1 → 0.5.2, `CURRENT_PROJECT_VERSION` 3 → 4.
+- HA integration `manifest.json` version 0.5.0 → 0.5.2 (was lagging the
+  bridge; bumped now so HA reloads the integration to pick up the new
+  optimistic-state handling).
+
+### Notes
+- `SetLockResult.unreachable` and `.timeout` are now unused on the
+  setLockState path but retained in the enum for source compatibility
+  with `BridgeServer.handleSetState`'s response mapping; if either is
+  ever produced by a future code path it'll still translate to the
+  same HTTP status as before.
+
 ## [0.5.1] — 2026-06-05
 
 ### Fixed

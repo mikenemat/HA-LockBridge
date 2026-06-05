@@ -20,6 +20,40 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         case timeout
     }
 
+    /// State for an in-flight background write. setLockState returns to HA
+    /// immediately with an optimistic state; the underlying writeValue is
+    /// retried in the background within a budget (transient HMError 82
+    /// "not reachable" responses from homed often resolve on their own once
+    /// the HomeKit hub re-establishes contact with the lock — typically
+    /// within seconds to ~half a minute). On exhaustion the optimistic
+    /// state is silently reverted so HA's UI flips back to the last-known
+    /// real state without an error toast.
+    fileprivate final class PendingWrite {
+        let target: Int
+        let priorState: AccessoryState?
+        let deadline: Date
+        var completed: Bool = false
+        var triggered: Bool = false
+        var attempt: Int = 0
+
+        init(target: Int, priorState: AccessoryState?, deadline: Date) {
+            self.target = target
+            self.priorState = priorState
+            self.deadline = deadline
+        }
+    }
+
+    /// Backoff schedule for the background write retry loop. After exhausting
+    /// the array we cap at the last value. Cumulative: 1+2+4+8+8+8 ≈ 31s of
+    /// retry potential, which matches the 30s deadline. A reachability
+    /// recovery callback can fire the next retry immediately, ignoring the
+    /// scheduled delay.
+    private static let writeBackoffDelays: [Double] = [1.0, 2.0, 4.0, 8.0]
+    /// Background retry budget. Matches the `transitionWindow` in
+    /// `deriveLifecycle` so HA's UI shows "locking"/"unlocking" for the
+    /// entire retry window without prematurely settling.
+    private static let writeBudgetSeconds: TimeInterval = 30
+
     typealias StateObserver = (AccessoryState) -> Void
     typealias RemovalObserver = (UUID) -> Void
 
@@ -68,6 +102,18 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     /// "accessory not known to bridge" because trackedAccessories is keyed
     /// by HMAccessory.uniqueIdentifier, not by the published wire ID.
     private var wireIDToHMUUID: [UUID: UUID] = [:]
+
+    /// In-flight async-accept writes. Keyed by HMAccessory UUID (NOT wire ID).
+    /// At most one entry per accessory; a new setLockState call supersedes
+    /// any prior pending write for the same accessory.
+    private var pendingWrites: [UUID: PendingWrite] = [:]
+
+    /// Callbacks waiting for an accessory's reachability to flip back to
+    /// `true`. Fired and drained by `accessoryDidUpdateReachability` when
+    /// the accessory becomes reachable. Used by the background write retry
+    /// loop to retry immediately on recovery instead of waiting out the
+    /// backoff timer.
+    private var reachabilityRecoveryWaiters: [UUID: [() -> Void]] = [:]
 
     private var pendingCommand: PendingCommand?
     private var commandFired = false
@@ -131,9 +177,27 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         observers.removeAll { $0.token === token }
     }
 
-    /// Set lock target state. Completion called on main thread.
-    /// Returns immediately after HomeKit acknowledges the write; the current_state
-    /// update will arrive separately via the observer pipeline.
+    /// Set lock target state. Completion called on the main thread.
+    ///
+    /// **Async-accept semantics.** The completion fires *immediately* with
+    /// an optimistic `.ok(state)` reflecting the requested target, before
+    /// `writeValue` has been attempted (or retried). HA's UI sees
+    /// `lifecycle_state = "locking"/"unlocking"` instantly. A background
+    /// retry loop then writes to HomeKit with up to a 30-second budget,
+    /// recovering from transient `HMError 82 (not reachable)` responses
+    /// when the HomeKit hub re-establishes contact with the lock. On
+    /// success the real `current_state` update arrives via the observer
+    /// pipeline; on exhaustion the optimistic state is silently reverted.
+    ///
+    /// The only synchronous failure modes returned through completion are
+    /// `.notFound` (no matching tracked accessory) and `.homekitError`
+    /// (the accessory lacks the lock-mechanism characteristic). Note
+    /// `.unreachable` is **never** returned — we accept the command even
+    /// when `accessory.isReachable == false` because that value can be
+    /// stale and the underlying connectivity often recovers within the
+    /// retry budget. `.timeout` and `.unreachable` remain in the enum for
+    /// backward-compatibility with BridgeServer's response mapping but
+    /// are unused on this path.
     func setLockState(id: UUID, target: Int, completion: @escaping (SetLockResult) -> Void) {
         // Resolve the wire ID HA sent us to the HMAccessory UUID. See the
         // comment on `wireIDToHMUUID` for why this exists.
@@ -141,36 +205,205 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         guard let accessory = trackedAccessories[hmID] else {
             completion(.notFound); return
         }
-        guard accessory.isReachable else {
-            completion(.unreachable); return
-        }
         guard let service = accessory.services.first(where: { $0.serviceType == HMServiceTypeLockMechanism }),
               let targetChar = service.characteristics.first(where: { $0.characteristicType == HMCharacteristicTypeTargetLockMechanismState }) else {
             completion(.homekitError("lock characteristic missing")); return
         }
 
-        let timeoutWork = DispatchWorkItem { completion(.timeout) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: timeoutWork)
+        // Cancel any prior in-flight write for this accessory. The user
+        // has changed their mind (e.g. tapped Unlock while a previous Lock
+        // command was still retrying); the old retry loop becomes a no-op
+        // on its next callback by checking `completed`.
+        if let existing = pendingWrites[hmID] {
+            log("Lock \(accessory.name): superseding prior pending write (target=\(existing.target)) with new target=\(target)")
+            existing.completed = true
+            pendingWrites.removeValue(forKey: hmID)
+        }
 
-        targetChar.writeValue(NSNumber(value: target)) { [weak self] error in
-            guard !timeoutWork.isCancelled else { return }
-            timeoutWork.cancel()
+        // Capture the pre-optimistic-update state for potential revert. If
+        // there's no prior state in the store, fall back to nil — revert
+        // logic handles that case by recomputing from HMCharacteristic.
+        let priorState = stateStore[hmID]
+
+        // Mark target change so deriveLifecycle returns "locking" /
+        // "unlocking" for the entire 30-second retry window.
+        lastTargetChange[hmID] = Date()
+
+        // Build the optimistic state. Either overlay the new target on the
+        // prior published state (preserves the wire ID and accessory
+        // metadata), or, if no prior state exists, compute fresh from
+        // HMCharacteristic and overlay target.
+        let optimisticState: AccessoryState
+        if let prior = priorState {
+            optimisticState = prior.with(target: target, lastTargetChange: lastTargetChange[hmID])
+        } else {
+            let computed = AccessoryState.from(
+                accessory: accessory,
+                info: infoCache[hmID] ?? [:],
+                lastTargetChange: lastTargetChange[hmID]
+            )
+            optimisticState = computed.with(target: target, lastTargetChange: lastTargetChange[hmID])
+        }
+
+        // Publish the optimistic state to observers AND store it so
+        // recomputeAndPublish's dedup uses it as the baseline.
+        stateStore[hmID] = optimisticState
+        if let wireUUID = UUID(uuidString: optimisticState.id) {
+            wireIDToHMUUID[wireUUID] = hmID
+        }
+        emitDebugJSON(newState: optimisticState, reason: "optimistic")
+        if isHealthy(optimisticState) {
+            for o in observers { o.onState(optimisticState) }
+        }
+
+        // Return immediately to HA. The bridge has accepted the command;
+        // the underlying HomeKit write will succeed or fail in the
+        // background.
+        completion(.ok(optimisticState))
+
+        // Spin up the background retry loop.
+        let pending = PendingWrite(
+            target: target,
+            priorState: priorState,
+            deadline: Date().addingTimeInterval(Self.writeBudgetSeconds)
+        )
+        pendingWrites[hmID] = pending
+
+        // Safety net: a deadline timer that calls revert() if the loop is
+        // still pending when the budget expires. The retry loop also
+        // checks the deadline before scheduling, so in the common case the
+        // loop's own check fires first and the safety net is a no-op.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.writeBudgetSeconds) { [weak self] in
+            guard let self = self, let still = self.pendingWrites[hmID], still === pending, !still.completed else { return }
+            self.log("Lock \(accessory.name): write budget (\(Int(Self.writeBudgetSeconds))s) elapsed via safety timer")
+            self.revertPending(hmID: hmID, accessory: accessory, pending: still)
+        }
+
+        attemptBackgroundWrite(targetChar: targetChar, accessory: accessory, hmID: hmID, pending: pending)
+    }
+
+    /// One write attempt for a pending background write. Reschedules itself
+    /// on transient `HMError 82` until the deadline; calls `revertPending`
+    /// or `completeSuccess` on terminal outcomes. Always called on the
+    /// main thread.
+    private func attemptBackgroundWrite(
+        targetChar: HMCharacteristic,
+        accessory: HMAccessory,
+        hmID: UUID,
+        pending: PendingWrite
+    ) {
+        guard !pending.completed else { return }
+        pending.attempt += 1
+        pending.triggered = false
+        let thisAttempt = pending.attempt
+
+        targetChar.writeValue(NSNumber(value: pending.target)) { [weak self] error in
+            guard let self = self, !pending.completed else { return }
+
             if let error = error {
-                completion(.homekitError(error.localizedDescription))
+                let nsError = error as NSError
+                let isNotReachable = nsError.domain == HMErrorDomain && nsError.code == 82
+                if !isNotReachable {
+                    self.log("Lock \(accessory.name): background write failed (attempt \(thisAttempt)) with non-retryable error: \(error.localizedDescription)")
+                    self.revertPending(hmID: hmID, accessory: accessory, pending: pending)
+                    return
+                }
+                if Date() >= pending.deadline {
+                    self.log("Lock \(accessory.name): background write budget exhausted after \(thisAttempt) attempt(s); reverting")
+                    self.revertPending(hmID: hmID, accessory: accessory, pending: pending)
+                    return
+                }
+                let delayIdx = min(thisAttempt - 1, Self.writeBackoffDelays.count - 1)
+                let delay = Self.writeBackoffDelays[delayIdx]
+                self.log("Lock \(accessory.name): write rejected as not-reachable (attempt \(thisAttempt), retry in up to \(delay)s or on reachability recovery)")
+
+                // The fire closure is idempotent — only the first caller
+                // (timer OR reachability waiter) actually triggers the
+                // next attempt. The other is a no-op.
+                let fire: () -> Void = { [weak self] in
+                    guard let self = self, !pending.completed, !pending.triggered else { return }
+                    pending.triggered = true
+                    self.attemptBackgroundWrite(targetChar: targetChar, accessory: accessory, hmID: hmID, pending: pending)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { fire() }
+                self.waitForReachabilityRecovery(of: hmID) { [weak self] in
+                    self?.log("Lock \(accessory.name): reachability recovered mid-retry; firing write immediately")
+                    fire()
+                }
                 return
             }
-            // Mark the target change so a subsequent state recompute returns
-            // the right `lifecycle_state` ("locking"/"unlocking") even if our
-            // HMAccessoryDelegate hasn't received the target update yet.
-            self?.lastTargetChange[hmID] = Date()
-            self?.recomputeAndPublish(for: accessory, reason: "post-write")
-            let state = self?.stateStore[hmID] ?? AccessoryState.from(
-                accessory: accessory,
-                info: self?.infoCache[hmID] ?? [:],
-                lastTargetChange: self?.lastTargetChange[hmID]
-            )
-            completion(.ok(state))
+
+            // Success. Refresh the transition window so HA's UI shows
+            // "locking"/"unlocking" until current_state physically matches
+            // target, then re-publish from live HMCharacteristic so any
+            // characteristic updates that landed during the retry are
+            // reflected. (The optimistic state already has target=target,
+            // so dedup will typically skip the broadcast unless other
+            // fields changed.)
+            self.log("Lock \(accessory.name): background write accepted on attempt \(thisAttempt)")
+            pending.completed = true
+            self.pendingWrites.removeValue(forKey: hmID)
+            self.lastTargetChange[hmID] = Date()
+            self.recomputeAndPublish(for: accessory, reason: "post-write")
         }
+    }
+
+    /// Revert an optimistic state publish after the background retry budget
+    /// has been exhausted (or a non-retryable HomeKit error). Behavior:
+    ///
+    /// - If the lock's *physical* current_state characteristic already
+    ///   matches the pending target (e.g. someone else issued a command
+    ///   that reached the lock, or it was manually operated), we don't
+    ///   revert — the user's intent ended up satisfied. We just clear the
+    ///   transition window and let recomputeAndPublish settle the
+    ///   lifecycle naturally.
+    /// - Otherwise restore the captured priorState (the published state
+    ///   from before this command's optimistic update) so HA's UI flips
+    ///   back to the last-known real state. Silent — no error toast.
+    /// - If no priorState was captured (first-ever command on this
+    ///   accessory), fall back to recomputing from HMCharacteristic.
+    private func revertPending(hmID: UUID, accessory: HMAccessory, pending: PendingWrite) {
+        guard !pending.completed else { return }
+        pending.completed = true
+        pendingWrites.removeValue(forKey: hmID)
+        lastTargetChange.removeValue(forKey: hmID)
+
+        let liveCurrent: Int? = accessory.services
+            .flatMap { $0.characteristics }
+            .first { $0.characteristicType == HMCharacteristicTypeCurrentLockMechanismState }
+            .flatMap { ($0.value as? NSNumber)?.intValue }
+
+        if let c = liveCurrent, c == pending.target {
+            log("Lock \(accessory.name): physical current_state already matches pending target=\(pending.target); skipping revert")
+            recomputeAndPublish(for: accessory, reason: "write-giveup-already-at-target")
+            return
+        }
+
+        guard let prior = pending.priorState else {
+            recomputeAndPublish(for: accessory, reason: "write-giveup-no-prior")
+            return
+        }
+
+        // Restore the prior published state directly. We bypass
+        // recomputeAndPublish because we want the *exact* prior snapshot
+        // (id, name, current_state-at-the-time, etc.) republished to HA —
+        // not a fresh derivation that would re-run the target-change
+        // detection logic.
+        stateStore[hmID] = prior
+        if let wireUUID = UUID(uuidString: prior.id) {
+            wireIDToHMUUID[wireUUID] = hmID
+        }
+        emitDebugJSON(newState: prior, reason: "write-giveup-revert")
+        if isHealthy(prior) {
+            for o in observers { o.onState(prior) }
+        }
+    }
+
+    /// Register a callback to fire when `hmID` next transitions to
+    /// `isReachable == true`. Drained by `accessoryDidUpdateReachability`.
+    /// Multiple waiters allowed (FIFO).
+    private func waitForReachabilityRecovery(of hmID: UUID, callback: @escaping () -> Void) {
+        reachabilityRecoveryWaiters[hmID, default: []].append(callback)
     }
 
     // MARK: - HMHomeManagerDelegate
@@ -247,6 +480,12 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         infoCache.removeValue(forKey: id)
         lastTargetChange.removeValue(forKey: id)
         homeNameForAccessory.removeValue(forKey: id)
+        // Cancel any in-flight background write — the accessory is gone,
+        // there's nothing to write to and nowhere to revert to.
+        if let pending = pendingWrites.removeValue(forKey: id) {
+            pending.completed = true
+        }
+        reachabilityRecoveryWaiters.removeValue(forKey: id)
         for o in observers {
             o.onRemoved(removedWireID)
         }
@@ -474,9 +713,17 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     }
 
     func accessoryDidUpdateReachability(_ accessory: HMAccessory) {
+        let hmID = accessory.uniqueIdentifier
         log("Reachability change: \(accessory.name) reachable=\(accessory.isReachable)")
-        if accessory.isReachable, trackedAccessories[accessory.uniqueIdentifier] != nil {
+        if accessory.isReachable, trackedAccessories[hmID] != nil {
             subscribeAndRead(accessory)
+            // Drain any background-write waiters for this accessory so the
+            // retry fires immediately on recovery rather than waiting out
+            // its backoff timer.
+            if let waiters = reachabilityRecoveryWaiters.removeValue(forKey: hmID), !waiters.isEmpty {
+                log("  firing \(waiters.count) reachability waiter(s) for \(accessory.name)")
+                for w in waiters { w() }
+            }
         }
         recomputeAndPublish(for: accessory, reason: "reachability")
     }
@@ -581,6 +828,27 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             pinnedID = computed.id
         }
         let newState = computed.with(id: pinnedID)
+
+        // External-satisfaction shortcut: if a background write is pending
+        // for this accessory and the *live* current_state we just computed
+        // already matches the pending target, the user's intent was
+        // achieved by some other path (HomeKey tap, manual operation,
+        // another HomeKit controller). Cancel the retry and let the
+        // natural lifecycle settle. Note this runs BEFORE the dedup check
+        // below so it triggers even on no-op recomputes.
+        if let pending = pendingWrites[id], let cr = newState.currentStateRaw, cr == pending.target {
+            log("Lock \(accessory.name): pending write target=\(pending.target) satisfied by external change; cancelling background retry")
+            pending.completed = true
+            pendingWrites.removeValue(forKey: id)
+            // Clearing the transition window lets deriveLifecycle return
+            // a stable "locked"/"unlocked" since current==target. We don't
+            // change `newState.lifecycleState` here — the next
+            // recomputeAndPublish (driven by a subsequent HMCharacteristic
+            // update or a natural quiescence) will pick this up cleanly,
+            // and the optimistic state we published earlier will fade
+            // into the stable state via that path.
+            lastTargetChange.removeValue(forKey: id)
+        }
 
         let prior = stateStore[id]
         stateStore[id] = newState

@@ -34,6 +34,39 @@ struct AccessoryState: Codable, Equatable {
         case updatedAt = "updated_at"
     }
 
+    /// Return a copy with `target_state` and `lifecycle_state` overlaid with
+    /// the requested target, recomputing lifecycle from current/target/now.
+    /// Used by setLockState's async-accept path to synthesize an optimistic
+    /// state for HA before HomeKit has actually accepted the write — the
+    /// HMCharacteristic value for target hasn't been written yet, so we
+    /// can't get this from `AccessoryState.from` directly.
+    func with(target newTargetRaw: Int, lastTargetChange: Date?, now: Date = Date()) -> AccessoryState {
+        let newLifecycle = deriveLifecycle(
+            current: self.currentStateRaw,
+            target: newTargetRaw,
+            reachable: self.reachable,
+            lastTargetChange: lastTargetChange,
+            now: now
+        )
+        return AccessoryState(
+            id: self.id,
+            name: self.name,
+            manufacturer: self.manufacturer,
+            model: self.model,
+            firmwareVersion: self.firmwareVersion,
+            serialNumber: self.serialNumber,
+            reachable: self.reachable,
+            currentState: self.currentState,
+            currentStateRaw: self.currentStateRaw,
+            targetState: targetStateName(newTargetRaw),
+            targetStateRaw: newTargetRaw,
+            lifecycleState: newLifecycle,
+            batteryLevel: self.batteryLevel,
+            lowBattery: self.lowBattery,
+            updatedAt: iso8601.string(from: now)
+        )
+    }
+
     /// Return a copy with `id` replaced. Used by HomeKitMonitor to pin the
     /// wire ID from AccessoryIdentityCache after construction — the cache
     /// holds the immutable wire ID chosen at first sight, which may differ
@@ -157,7 +190,11 @@ func deriveLifecycle(
     reachable: Bool,
     lastTargetChange: Date?,
     now: Date,
-    transitionWindow: TimeInterval = 15
+    // Extended from 15s → 30s to match the async-accept retry budget in
+    // HomeKitMonitor.setLockState. During the background retry window we
+    // want HA's UI to keep showing "locking"/"unlocking" rather than
+    // reverting to a stable state derived from the stale current_state.
+    transitionWindow: TimeInterval = 30
 ) -> String {
     if current == 2 { return "jammed" }
     guard let c = current else { return "unknown" }
