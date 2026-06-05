@@ -43,6 +43,7 @@ macos-app/DevelopmentTeam.xcconfig
 # Belt-and-suspenders: refuse to commit any local config file by convention.
 *.local.json
 config.local.json
+*.local.sh
 
 # --- Possible cert/key material that should never land in the repo ---
 *.pem
