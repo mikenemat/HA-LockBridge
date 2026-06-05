@@ -4,6 +4,24 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.5.4] — 2026-06-05
+
+### Fixed
+- **Wire-protocol version no longer lies.** Three places that publish a
+  "version" field — the Bonjour TXT record, the WebSocket `hello`
+  envelope, and the `/info` HTTP endpoint — all carried a hardcoded
+  `"0.5.0"` literal that survived through 0.5.1/0.5.2/0.5.3 (the
+  marketing version moved; this didn't). `curl /info` was lying about
+  which build was running, which is a real footgun for anyone
+  debugging a misbehaving deployment.
+  All three now read `CFBundleShortVersionString` at runtime via a
+  new `Bundle.bridgeMarketingVersion` extension (Version.swift), so
+  the value can't drift again — it's the same source the App Store
+  uses for the user-visible version.
+
+### Changed
+- `MARKETING_VERSION` 0.5.3 → 0.5.4, `CURRENT_PROJECT_VERSION` 5 → 6.
+
 ## [0.5.3] — 2026-06-05
 
 ### Added

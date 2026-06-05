@@ -103,8 +103,8 @@ targets:
         # HA-LockBridge so the on-disk .app and the user-facing name are
         # unaffected.
         PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).HALockBridgeApp
-        MARKETING_VERSION: "0.5.3"
-        CURRENT_PROJECT_VERSION: "5"
+        MARKETING_VERSION: "0.5.4"
+        CURRENT_PROJECT_VERSION: "6"
         SUPPORTS_MACCATALYST: YES
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
         TARGETED_DEVICE_FAMILY: "2,6"
