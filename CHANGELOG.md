@@ -4,6 +4,33 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.5.8] — 2026-06-05
+
+### Removed
+- **0.5.7's accessory characteristic dump.** The diagnostic served its
+  purpose — confirmed empirically that neither ThorBolt X1 nor August
+  Assure Lock 2 Plus implements `LockMechanismLastKnownAction`,
+  `Logs`, or any sensor service (contact / motion) beyond the standard
+  LockMechanism profile. Findings are captured in `IDEAS.md` along
+  with the future-work proposals (external-state-change events,
+  Heart Beat as a health signal) those findings inform. Removes the
+  `diagSink` property on `HomeKitMonitor`, the `dumpAccessoryDiagnostic`
+  method + helpers, the `accessory-dump.txt` file write in AppDelegate,
+  and the stderr DIAG: lines. Functional behavior unchanged.
+
+### Added
+- **`IDEAS.md`** at repo root. Tracks optional future work that came
+  out of the 0.5.7 investigation: external-state-change events on the
+  Stats page (no source attribution but cleanly tags "bridge" vs
+  "external"), Heart Beat / Sleep Interval as a leading-indicator
+  health signal, and a "ruled out" section so we don't re-litigate
+  the things we already confirmed aren't possible
+  (`LockMechanismLastKnownAction`, iCloud user attribution, contact
+  sensors, etc.).
+
+### Changed
+- `MARKETING_VERSION` 0.5.7 → 0.5.8, `CURRENT_PROJECT_VERSION` 9 → 10.
+
 ## [0.5.7] — 2026-06-05
 
 ### Added
