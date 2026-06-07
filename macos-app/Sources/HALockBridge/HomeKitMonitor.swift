@@ -118,6 +118,40 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     /// real-world wait before we give up and commit fallback.
     private static let maxSerialAttempts = 3
 
+    /// Lock-mechanism + battery characteristics we subscribe to for live
+    /// notifications. Hoisted to a static so both the initial
+    /// `subscribeAndRead` and the periodic `reassertNotifications` health
+    /// pass share one source of truth.
+    private static let notifyingCharacteristicTypes: Set<String> = [
+        HMCharacteristicTypeCurrentLockMechanismState,
+        HMCharacteristicTypeTargetLockMechanismState,
+        HMCharacteristicTypeBatteryLevel,
+        HMCharacteristicTypeStatusLowBattery,
+    ]
+
+    /// Max attempts to (re-)enable a characteristic notification before
+    /// giving up for this pass. 3 = initial + 2 retries with the backoff
+    /// below. Exhausting these isn't fatal — the periodic resubscribe
+    /// timer is the long-term backstop.
+    private static let maxSubscribeAttempts = 3
+    /// Backoff after a failed `enableNotification`, in seconds. Capped at
+    /// the last entry.
+    private static let subscribeBackoffDelays: [Double] = [5, 15]
+
+    /// How often to re-assert notifications on reachable tracked
+    /// accessories. `homed` can silently drop notification delivery
+    /// (daemon restart on OS update / memory pressure / HomeKit hiccup)
+    /// WITHOUT firing a reachability transition — and a reachability flip
+    /// is otherwise the only thing that re-runs subscription. Without this
+    /// pass, a months-uptime bridge can go silently stale until an app
+    /// restart. `enableNotification(true)` on an already-live subscription
+    /// is a cheap no-op; on a dropped one it revives delivery.
+    private static let resubscribeInterval: TimeInterval = 180  // 3 min
+    /// Repeating main-queue timer driving the resubscribe health pass.
+    /// Held for the monitor's lifetime; cancelled is never needed (the
+    /// monitor lives as long as the process).
+    private var resubscribeTimer: DispatchSourceTimer?
+
     /// Reverse map from the *wire* ID (the stable hash we publish to HA) to
     /// the underlying HMAccessory.uniqueIdentifier. Populated by
     /// `recomputeAndPublish` and cleared in `forgetAccessory`. Used to route
@@ -163,6 +197,39 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         homeManager.delegate = self
         log("Started. Waiting for HomeKit authorization and home data…")
         log("Authorization status: \(describe(homeManager.authorizationStatus))")
+        startResubscribeTimer()
+    }
+
+    /// Kick off the periodic notification-health pass. See
+    /// `resubscribeInterval` for why this exists. Runs on the main queue
+    /// (same thread as all HomeKit bookkeeping). Early fires before any
+    /// accessory is discovered are harmless no-ops — `reassertSubscriptions`
+    /// just iterates an empty `trackedAccessories`.
+    private func startResubscribeTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + Self.resubscribeInterval,
+                       repeating: Self.resubscribeInterval)
+        timer.setEventHandler { [weak self] in
+            self?.reassertSubscriptions(reason: "periodic")
+        }
+        timer.resume()
+        resubscribeTimer = timer
+    }
+
+    /// Re-assert HomeKit notifications on every reachable tracked
+    /// accessory. The safety net against `homed` silently dropping
+    /// notification delivery without a reachability transition.
+    private func reassertSubscriptions(reason: String) {
+        let reachable = trackedAccessories.values.filter { $0.isReachable }
+        guard !reachable.isEmpty else { return }
+        log("Resubscribe pass (\(reason)): re-asserting notifications on \(reachable.count) reachable lock(s)")
+        for accessory in reachable {
+            // readValues: false → re-enable all notifications cheaply but
+            // only read current-lock-state (see reassertNotifications), so
+            // the every-3-min pass doesn't wake sleepy lock radios on every
+            // characteristic.
+            reassertNotifications(for: accessory, readValues: false)
+        }
     }
 
     // MARK: - Public API for BridgeServer
@@ -602,7 +669,24 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         // recomputeAndPublish always has it.
         homeNameForAccessory[accessory.uniqueIdentifier] = home.name
 
-        if trackedAccessories[accessory.uniqueIdentifier] != nil { return }
+        if trackedAccessories[accessory.uniqueIdentifier] != nil {
+            // Already tracked, and we're being re-handed this accessory —
+            // typically because HomeKit reloaded home data (e.g. homed
+            // restarted). That reload can silently drop our characteristic
+            // notifications, and HomeKit may even hand back a *fresh*
+            // HMAccessory instance for the same uniqueIdentifier, leaving
+            // our stored object (and its delegate registration) pointing
+            // at a dead instance. Refresh the stored reference + delegate
+            // and re-assert notifications so a homed bounce doesn't leave
+            // us silently stale until an app restart. (The periodic
+            // resubscribe timer is the other half of this safety net.)
+            trackedAccessories[accessory.uniqueIdentifier] = accessory
+            accessory.delegate = self
+            if accessory.isReachable {
+                reassertNotifications(for: accessory)
+            }
+            return
+        }
         trackedAccessories[accessory.uniqueIdentifier] = accessory
 
         log("Lock discovered: \(accessory.name) [\(accessory.uniqueIdentifier.uuidString)] home=\(home.name) reachable=\(accessory.isReachable)")
@@ -633,42 +717,73 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
 
 
     private func subscribeAndRead(_ accessory: HMAccessory) {
-        let notifyingTypes: Set<String> = [
-            HMCharacteristicTypeCurrentLockMechanismState,
-            HMCharacteristicTypeTargetLockMechanismState,
-            HMCharacteristicTypeBatteryLevel,
-            HMCharacteristicTypeStatusLowBattery,
-        ]
-        // Only SerialNumber is read as a characteristic. The other three
+        // Establish live notifications on the lock + battery characteristics.
+        reassertNotifications(for: accessory)
+
+        // Read the SerialNumber characteristic once. The other info fields
         // (Manufacturer, Model, FirmwareVersion) are deprecated since iOS 11
         // and unavailable on macOS — Apple's replacement is direct
         // HMAccessory.manufacturer / .model / .firmwareVersion properties,
         // which we read synchronously in recomputeAndPublish. SerialNumber
         // has no equivalent property and stays on the characteristic path.
-        let readOnceTypes: Set<String> = [
-            HMCharacteristicTypeSerialNumber,
-        ]
-
         for service in accessory.services {
-            for characteristic in service.characteristics {
-                if notifyingTypes.contains(characteristic.characteristicType) {
-                    subscribe(characteristic, accessory: accessory)
-                } else if readOnceTypes.contains(characteristic.characteristicType) {
-                    readInfo(characteristic, accessory: accessory)
-                }
+            for characteristic in service.characteristics
+            where characteristic.characteristicType == HMCharacteristicTypeSerialNumber {
+                readInfo(characteristic, accessory: accessory)
             }
         }
 
         recomputeAndPublish(for: accessory, reason: "initial")
     }
 
-    private func subscribe(_ characteristic: HMCharacteristic, accessory: HMAccessory) {
+    /// (Re-)enable notifications on the lock + battery characteristics for
+    /// one accessory. Idempotent — `enableNotification(true)` on an
+    /// already-live subscription is a no-op, on a dropped one it revives
+    /// delivery. Used both for the initial subscribe and by the periodic /
+    /// homed-reload resubscribe health paths.
+    ///
+    /// `readValues` controls whether the success path also reads each
+    /// characteristic's current value. The initial subscribe and the
+    /// homed-reload re-entry pass `true` (infrequent; we want fresh state
+    /// immediately). The periodic health pass passes `false` to avoid
+    /// waking sleepy lock radios on every characteristic every few minutes
+    /// — but we always read the *current-lock-state* characteristic
+    /// regardless, since that's the one value whose staleness genuinely
+    /// matters and the read is cache-served by homed when the subscription
+    /// is healthy.
+    private func reassertNotifications(for accessory: HMAccessory, readValues: Bool = true) {
+        for service in accessory.services {
+            for characteristic in service.characteristics
+            where Self.notifyingCharacteristicTypes.contains(characteristic.characteristicType) {
+                let read = readValues
+                    || characteristic.characteristicType == HMCharacteristicTypeCurrentLockMechanismState
+                subscribe(characteristic, accessory: accessory, readOnSuccess: read)
+            }
+        }
+    }
+
+    private func subscribe(_ characteristic: HMCharacteristic, accessory: HMAccessory, attempt: Int = 1, readOnSuccess: Bool = true) {
         characteristic.enableNotification(true) { [weak self] error in
             guard let self = self else { return }
             if let error = error {
-                self.log("enableNotification failed for \(self.shortType(characteristic.characteristicType)) on \(accessory.name): \(error.localizedDescription)")
+                self.log("enableNotification failed for \(self.shortType(characteristic.characteristicType)) on \(accessory.name) [attempt \(attempt)/\(Self.maxSubscribeAttempts)]: \(error.localizedDescription)")
+                // Retry with backoff. A transient failure here (lock
+                // briefly unreachable at subscribe time) would otherwise
+                // leave this characteristic permanently non-notifying until
+                // a reachability flip happened to re-run subscription. If
+                // all attempts fail, the periodic resubscribe timer is the
+                // long-term backstop.
+                guard attempt < Self.maxSubscribeAttempts else { return }
+                let delay = Self.subscribeBackoffDelays[min(attempt - 1, Self.subscribeBackoffDelays.count - 1)]
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    guard let self = self,
+                          self.trackedAccessories[accessory.uniqueIdentifier] != nil,
+                          accessory.isReachable else { return }
+                    self.subscribe(characteristic, accessory: accessory, attempt: attempt + 1, readOnSuccess: readOnSuccess)
+                }
                 return
             }
+            guard readOnSuccess else { return }
             characteristic.readValue { [weak self] readError in
                 if let readError = readError {
                     self?.log("readValue failed for \(self?.shortType(characteristic.characteristicType) ?? "?") on \(accessory.name): \(readError.localizedDescription)")

@@ -4,6 +4,39 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.5.10] — 2026-06-05
+
+### Fixed
+- **HomeKit subscriptions now self-heal over long uptime.** Previously the
+  only thing that re-established characteristic notifications was a
+  reachability transition to `true`. If `homed` restarted or silently
+  dropped notification delivery (OS update, memory pressure, HomeKit
+  daemon hiccup) *without* a reachability flip, the bridge stopped
+  receiving state updates and HA went stale until the app was manually
+  restarted — a real failure mode for a months-uptime bridge. Two
+  safety nets added:
+  1. **Periodic resubscribe pass** (every 3 min). Re-asserts notifications
+     on every reachable tracked lock. `enableNotification(true)` is
+     idempotent — a no-op on a healthy subscription, a revival on a
+     dropped one. To avoid waking sleepy lock radios, the periodic pass
+     re-enables all four notifying characteristics but only *reads* the
+     current-lock-state value (the one whose staleness actually matters,
+     and a cache-served read when the subscription is healthy).
+  2. **homed-reload re-subscribe.** `considerAccessory` no longer silently
+     short-circuits when HomeKit re-hands an already-tracked accessory
+     (which happens on a homed reload). It now refreshes the stored
+     `HMAccessory` reference + delegate and re-asserts notifications —
+     fixing the case where homed hands back a *fresh* accessory instance
+     and our delegate ends up registered on a dead object.
+- **Characteristic subscription failures now retry.** `enableNotification`
+  failures previously logged and gave up, leaving that characteristic
+  non-notifying until a reachability flip. It now retries up to 3 attempts
+  with 5s/15s backoff (mirroring the existing serial-number read), with
+  the periodic resubscribe pass as the long-term backstop.
+
+### Changed
+- `MARKETING_VERSION` 0.5.9 → 0.5.10, `CURRENT_PROJECT_VERSION` 11 → 12.
+
 ## [0.5.9] — 2026-06-05
 
 ### Fixed
