@@ -4,6 +4,30 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.5.7] — 2026-06-05
+
+### Added
+- **One-shot accessory characteristic dump for diagnostics.** On every
+  bridge startup, each tracked lock's full service + characteristic
+  tree (with values, properties, and metadata including `validValues`
+  for enum-typed characteristics) is written to a new
+  `accessory-dump.txt` file next to `config.json`, and mirrored to
+  stderr with a `[ha-lockbridge] DIAG:` prefix. Used to discover
+  which extended characteristics each lock implements
+  (`LockMechanismLastKnownAction`, `LockManagementAutoSecureTimeout`,
+  `ContactState`, `MotionDetected`, `Logs`, etc.) so future versions
+  can selectively surface them. Pretty-prints well-known HMService and
+  HMCharacteristic UUIDs; falls back to `(unknown)` for vendor-custom
+  types — a missing entry is still useful information (the raw UUID
+  is always printed).
+  The dump file is truncated at each bridge startup so it always
+  reflects the current run, never accumulates across restarts. Sink
+  is gated on `monitor.diagSink != nil` so CLI-test mode and tests
+  skip it silently.
+
+### Changed
+- `MARKETING_VERSION` 0.5.6 → 0.5.7, `CURRENT_PROJECT_VERSION` 8 → 9.
+
 ## [0.5.6] — 2026-06-05
 
 ### Changed

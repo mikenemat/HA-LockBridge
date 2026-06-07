@@ -172,6 +172,31 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             // and intentionally leaves monitor.lockEventLog == nil.
             monitor.lockEventLog = lockEventLog
 
+            // Diagnostic dump sink for the one-shot accessory characteristic
+            // tree. Writes both to stderr (with [ha-lockbridge] DIAG: prefix
+            // so it's grep-able from direct-launch sessions) and appends to
+            // `accessory-dump.txt` next to config.json so it can be read
+            // back via the filesystem regardless of how the app was
+            // launched. The file is truncated here at every bridge startup
+            // so each run gets a fresh dump.
+            let dumpURL = path.deletingLastPathComponent().appendingPathComponent("accessory-dump.txt")
+            try? "".write(to: dumpURL, atomically: false, encoding: .utf8)
+            log("Diagnostic accessory dump → \(dumpURL.path)")
+            monitor.diagSink = { text in
+                // stderr — prefix each line for grep-ability
+                let prefixed = text.split(separator: "\n", omittingEmptySubsequences: false)
+                    .map { "[ha-lockbridge] DIAG: \($0)" }
+                    .joined(separator: "\n")
+                FileHandle.standardError.write(Data((prefixed + "\n").utf8))
+                // file — append raw (no per-line prefix; the file is
+                // standalone and the prefix would just be noise)
+                if let fh = try? FileHandle(forWritingTo: dumpURL) {
+                    defer { try? fh.close() }
+                    _ = try? fh.seekToEnd()
+                    try? fh.write(contentsOf: Data(text.utf8))
+                }
+            }
+
             // Wire PairingManager → ViewModel. Also bounce the Dock icon so
             // the user notices even if the pair window is behind other apps.
             pairing.onRequestStarted = { [weak self, weak viewModel] reqID, name in

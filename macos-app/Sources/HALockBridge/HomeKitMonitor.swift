@@ -103,6 +103,18 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     /// (background-write retries, reachability gaps) silently no-op
     /// on the logging side; functional behavior is unaffected.
     var lockEventLog: LockEventLog?
+
+    /// Diagnostic dump sink. Invoked once per accessory at discovery
+    /// with a multi-line "what services + characteristics does this
+    /// accessory expose" block. AppDelegate wires this to both stderr
+    /// (with [ha-lockbridge] DIAG: prefix) and a file
+    /// `accessory-dump.txt` next to `config.json`. Used to discover
+    /// which extended characteristics each tracked lock implements
+    /// (e.g. LockMechanismLastKnownAction, LockManagementAutoSecureTimeout,
+    /// ContactState, MotionDetected, Logs) so we can decide which to
+    /// surface. When nil, the dump is silently skipped — functional
+    /// behavior is unaffected.
+    var diagSink: ((String) -> Void)?
     /// Accessories whose SerialNumber characteristic exists but failed all
     /// retry attempts. Treated as "no serial available, ever" — the cache
     /// commits the fallback HMAccessory.uniqueIdentifier instead of
@@ -618,6 +630,12 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         }
         accessory.delegate = self
 
+        // One-shot diagnostic: dump the full service + characteristic tree
+        // so we can see what this lock exposes beyond the 5 characteristics
+        // we currently read. Fires once per accessory per bridge run
+        // (gated by the trackedAccessories early-exit above).
+        dumpAccessoryDiagnostic(accessory, home: home)
+
         if accessory.isReachable {
             subscribeAndRead(accessory)
         } else {
@@ -629,6 +647,141 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         }
 
         maybeFirePendingCommand(against: accessory)
+    }
+
+    /// One-shot diagnostic dump of every service + characteristic on an
+    /// accessory. Output goes through `diagSink` if set (stderr + file
+    /// via AppDelegate wiring). Pretty-prints well-known HMService /
+    /// HMCharacteristic type UUIDs to human-readable names, and falls
+    /// back to the raw UUID for vendor-custom types — so a missing entry
+    /// in the lookup tables is still useful information.
+    private func dumpAccessoryDiagnostic(_ accessory: HMAccessory, home: HMHome) {
+        guard let sink = diagSink else { return }
+        var out = ""
+        out += "===== Accessory: \(accessory.name) =====\n"
+        out += "  uniqueIdentifier: \(accessory.uniqueIdentifier.uuidString)\n"
+        out += "  home: \(home.name)\n"
+        out += "  manufacturer: \(accessory.manufacturer ?? "nil")\n"
+        out += "  model: \(accessory.model ?? "nil")\n"
+        out += "  firmwareVersion: \(accessory.firmwareVersion ?? "nil")\n"
+        // NB: HMAccessory has no direct `hardwareVersion` property — it
+        // only surfaces via the HMCharacteristicTypeHardwareVersion
+        // characteristic on the AccessoryInformation service, which the
+        // per-characteristic dump below will pick up if implemented.
+        out += "  category: \(accessory.category.categoryType) (\(accessory.category.localizedDescription))\n"
+        out += "  isReachable: \(accessory.isReachable)\n"
+        out += "  isBridged: \(accessory.isBridged)\n"
+        out += "  isBlocked: \(accessory.isBlocked)\n"
+        out += "  room: \(accessory.room?.name ?? "nil")\n"
+        out += "  services: \(accessory.services.count)\n"
+        for (i, service) in accessory.services.enumerated() {
+            let svcName = Self.prettyServiceName(service.serviceType)
+            out += "\n  [service \(i)] \(svcName)\n"
+            out += "    serviceType: \(service.serviceType)\n"
+            out += "    name: \(service.name)\n"
+            out += "    isPrimaryService: \(service.isPrimaryService)\n"
+            out += "    characteristics: \(service.characteristics.count)\n"
+            for (j, char) in service.characteristics.enumerated() {
+                let charName = Self.prettyCharacteristicName(char.characteristicType)
+                out += "      [char \(j)] \(charName)\n"
+                out += "        characteristicType: \(char.characteristicType)\n"
+                out += "        value: \(Self.describeValue(char.value))\n"
+                out += "        properties: [\(char.properties.joined(separator: ", "))]\n"
+                if let meta = char.metadata {
+                    var bits: [String] = []
+                    if let f = meta.format { bits.append("format=\(f)") }
+                    if let u = meta.units { bits.append("units=\(u)") }
+                    if let mn = meta.minimumValue { bits.append("min=\(mn)") }
+                    if let mx = meta.maximumValue { bits.append("max=\(mx)") }
+                    if let s = meta.stepValue { bits.append("step=\(s)") }
+                    if let ml = meta.maxLength { bits.append("maxLength=\(ml)") }
+                    if let md = meta.manufacturerDescription { bits.append("desc=\"\(md)\"") }
+                    if let vv = meta.validValues, !vv.isEmpty {
+                        bits.append("validValues=\(vv.map { "\($0)" }.joined(separator: ","))")
+                    }
+                    if !bits.isEmpty {
+                        out += "        metadata: \(bits.joined(separator: " "))\n"
+                    }
+                }
+            }
+        }
+        out += "===== END Accessory: \(accessory.name) =====\n\n"
+        sink(out)
+    }
+
+    /// Pretty-print well-known HMServiceType UUIDs. Falls back to "(unknown)".
+    private static func prettyServiceName(_ type: String) -> String {
+        switch type {
+        case HMServiceTypeAccessoryInformation: return "AccessoryInformation"
+        case HMServiceTypeLockMechanism:        return "LockMechanism"
+        case HMServiceTypeLockManagement:       return "LockManagement"
+        case HMServiceTypeBattery:              return "Battery"
+        case HMServiceTypeContactSensor:        return "ContactSensor"
+        case HMServiceTypeMotionSensor:         return "MotionSensor"
+        case HMServiceTypeOccupancySensor:      return "OccupancySensor"
+        case HMServiceTypeDoorbell:             return "Doorbell"
+        case HMServiceTypeDoor:                 return "Door"
+        case HMServiceTypeLeakSensor:           return "LeakSensor"
+        case HMServiceTypeLightSensor:          return "LightSensor"
+        case HMServiceTypeSpeaker:              return "Speaker"
+        case HMServiceTypeMicrophone:           return "Microphone"
+        case HMServiceTypeStatelessProgrammableSwitch: return "StatelessProgrammableSwitch"
+        case HMServiceTypeStatefulProgrammableSwitch:  return "StatefulProgrammableSwitch"
+        case HMServiceTypeSwitch:               return "Switch"
+        default: return "(unknown service)"
+        }
+    }
+
+    /// Pretty-print well-known HMCharacteristicType UUIDs. Falls back to "(unknown)".
+    /// Subset focused on what's plausibly relevant to locks — extend as needed.
+    private static func prettyCharacteristicName(_ type: String) -> String {
+        switch type {
+        // Lock mechanism + management
+        case HMCharacteristicTypeCurrentLockMechanismState:    return "CurrentLockMechanismState"
+        case HMCharacteristicTypeTargetLockMechanismState:     return "TargetLockMechanismState"
+        case HMCharacteristicTypeLockMechanismLastKnownAction: return "LockMechanismLastKnownAction"
+        case HMCharacteristicTypeLockManagementAutoSecureTimeout: return "LockManagementAutoSecureTimeout"
+        case HMCharacteristicTypeLockManagementControlPoint:   return "LockManagementControlPoint"
+        case HMCharacteristicTypeLockPhysicalControls:         return "LockPhysicalControls"
+        case HMCharacteristicTypeLogs:                         return "Logs"
+        case HMCharacteristicTypeVersion:                      return "Version"
+        // Accessory info
+        case HMCharacteristicTypeManufacturer:    return "Manufacturer"
+        case HMCharacteristicTypeModel:           return "Model"
+        case HMCharacteristicTypeSerialNumber:    return "SerialNumber"
+        case HMCharacteristicTypeName:            return "Name"
+        case HMCharacteristicTypeFirmwareVersion: return "FirmwareVersion"
+        case HMCharacteristicTypeHardwareVersion: return "HardwareVersion"
+        case HMCharacteristicTypeIdentify:        return "Identify"
+        // Battery
+        case HMCharacteristicTypeBatteryLevel:    return "BatteryLevel"
+        case HMCharacteristicTypeStatusLowBattery: return "StatusLowBattery"
+        case HMCharacteristicTypeChargingState:   return "ChargingState"
+        // Sensors that some locks expose
+        case HMCharacteristicTypeContactState:    return "ContactState"
+        case HMCharacteristicTypeMotionDetected:  return "MotionDetected"
+        case HMCharacteristicTypeOccupancyDetected: return "OccupancyDetected"
+        case HMCharacteristicTypeCurrentDoorState: return "CurrentDoorState"
+        case HMCharacteristicTypeObstructionDetected: return "ObstructionDetected"
+        case HMCharacteristicTypeInputEvent:      return "InputEvent"
+        case HMCharacteristicTypeAdminOnlyAccess: return "AdminOnlyAccess"
+        default: return "(unknown char)"
+        }
+    }
+
+    /// Best-effort `Any?` → printable string for characteristic values.
+    /// Handles the common types HomeKit returns (NSNumber, NSString, Data
+    /// for TLV8) and falls back to Swift's default conversion. Large Data
+    /// values are truncated to keep the dump readable.
+    private static func describeValue(_ value: Any?) -> String {
+        guard let v = value else { return "nil" }
+        if let n = v as? NSNumber { return "\(n)" }
+        if let s = v as? String { return "\"\(s)\"" }
+        if let d = v as? Data {
+            let hex = d.prefix(32).map { String(format: "%02x", $0) }.joined()
+            return "Data(\(d.count) bytes, hex=\(hex)\(d.count > 32 ? "..." : ""))"
+        }
+        return "\(v)"
     }
 
     private func subscribeAndRead(_ accessory: HMAccessory) {
