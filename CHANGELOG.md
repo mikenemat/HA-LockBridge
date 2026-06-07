@@ -4,6 +4,29 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.5.11] — 2026-06-05
+
+### Fixed
+- **App Nap was never actually disabled (0.5.9 regression fix).** 0.5.9
+  held a `beginActivity` assertion with options
+  `[.idleSystemSleepDisabled, .automaticTerminationDisabled,
+  .suddenTerminationDisabled]` — which keeps the Mac awake and the process
+  un-terminable but, per Apple's Energy Efficiency Guide, does **not**
+  suppress App Nap. App Nap is keyed off the `.userInitiated` priority
+  signal specifically. So the process was still being throttled whenever
+  its window was hidden, which silently defeated *all three* recent
+  reliability fixes: the retry backoff timers stayed coalesced, the WS
+  keepalive ping (NIO scheduled task) still drifted past HA's 30s timeout,
+  and even the 0.5.10 resubscribe `DispatchSourceTimer` was throttled.
+  The options are now `[.userInitiated]`, which carries the App-Nap-
+  suppressing priority bits and is a strict superset of the previous
+  options (it already implies idle-system-sleep-disabled plus both
+  termination flags). Confirm via Activity Monitor → CPU → "App Nap"
+  column: with the window hidden it should now read **No**.
+
+### Changed
+- `MARKETING_VERSION` 0.5.10 → 0.5.11, `CURRENT_PROJECT_VERSION` 12 → 13.
+
 ## [0.5.10] — 2026-06-05
 
 ### Fixed

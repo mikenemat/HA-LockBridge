@@ -43,16 +43,28 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
 
     /// Process-lifetime activity assertion. Held for the entire run to (a)
     /// disable App Nap — without this, a headless `.accessory` app with no
-    /// visible window gets throttled: main-queue `asyncAfter` retry timers
-    /// AND NIO-scheduled WS ping tasks get coalesced, so lock commands stall
-    /// and HA's WebSocket can time out (30s of ping silence) until the
-    /// window is opened and the OS releases the nap — and (b) prevent idle
-    /// system sleep, since a bridge that's asleep is a bridge that's down.
-    /// `.idleSystemSleepDisabled` stops *idle* sleep (not lid-close / manual
-    /// sleep); combined with `begin/endActivity` semantics it also disables
-    /// App Nap for the duration. Kept as a stored property so the token
-    /// lives as long as the app — if it deallocated, the assertion would
-    /// lift. Released implicitly at process exit.
+    /// visible window gets throttled: main-queue `asyncAfter` retry timers,
+    /// the `DispatchSourceTimer` resubscribe pass, AND NIO-scheduled WS ping
+    /// tasks all get coalesced, so lock commands stall, HomeKit
+    /// subscriptions stop self-healing, and HA's WebSocket times out (30s of
+    /// ping silence) until the window is opened and the OS releases the
+    /// nap — and (b) prevent idle system sleep, since a bridge that's asleep
+    /// is a bridge that's down.
+    ///
+    /// CRITICAL: the options MUST include `.userInitiated`. That's the
+    /// priority signal App Nap keys off — per Apple's Energy Efficiency
+    /// Guide it's what tells the system "user-initiated work in progress,
+    /// do not nap me." `.idleSystemSleepDisabled` ALONE (what 0.5.9 shipped)
+    /// only prevents *system* sleep; it does NOT suppress App Nap, so the
+    /// process was still being throttled while hidden. `.userInitiated` is a
+    /// superset — it already implies `.idleSystemSleepDisabled` plus the
+    /// sudden/automatic-termination-disabled flags — so it covers the
+    /// keep-the-Mac-awake intent too. Don't regress this to the sleep-only
+    /// options.
+    ///
+    /// Kept as a stored property so the token lives as long as the app — if
+    /// it deallocated, the assertion would lift. Released implicitly at
+    /// process exit.
     private var activityToken: NSObjectProtocol?
 
     // SwiftUI status window
@@ -108,11 +120,13 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         // Opt out of App Nap + idle system sleep for the app's lifetime.
         // This MUST happen before the HomeKit monitor and bridge server
         // spin up, so their timers/WS pings are never throttled even
-        // momentarily. See the comment on `activityToken` for the full
-        // rationale (headless accessory apps are the canonical App Nap
-        // target; throttling stalls lock commands + WS keepalive).
+        // momentarily. `.userInitiated` is load-bearing — it carries the
+        // priority bits that actually suppress App Nap (and already implies
+        // idle-system-sleep + termination disabled). See the comment on
+        // `activityToken` for why `.idleSystemSleepDisabled` alone (0.5.9)
+        // was insufficient.
         activityToken = ProcessInfo.processInfo.beginActivity(
-            options: [.idleSystemSleepDisabled, .automaticTerminationDisabled, .suddenTerminationDisabled],
+            options: [.userInitiated],
             reason: "HomeKit lock bridge must stay awake and unthrottled while running"
         )
         FileHandle.standardError.write(Data("[lockbridge-server] App Nap + idle sleep disabled (beginActivity held)\n".utf8))
