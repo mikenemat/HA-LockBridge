@@ -41,6 +41,20 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     var interactionLog: InteractionLog?
     var lockEventLog: LockEventLog?
 
+    /// Process-lifetime activity assertion. Held for the entire run to (a)
+    /// disable App Nap — without this, a headless `.accessory` app with no
+    /// visible window gets throttled: main-queue `asyncAfter` retry timers
+    /// AND NIO-scheduled WS ping tasks get coalesced, so lock commands stall
+    /// and HA's WebSocket can time out (30s of ping silence) until the
+    /// window is opened and the OS releases the nap — and (b) prevent idle
+    /// system sleep, since a bridge that's asleep is a bridge that's down.
+    /// `.idleSystemSleepDisabled` stops *idle* sleep (not lid-close / manual
+    /// sleep); combined with `begin/endActivity` semantics it also disables
+    /// App Nap for the duration. Kept as a stored property so the token
+    /// lives as long as the app — if it deallocated, the assertion would
+    /// lift. Released implicitly at process exit.
+    private var activityToken: NSObjectProtocol?
+
     // SwiftUI status window
     var statusVM: StatusViewModel?
     var mainWindow: UIWindow?
@@ -90,6 +104,18 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     ) -> Bool {
         setbuf(stdout, nil)
         setbuf(stderr, nil)
+
+        // Opt out of App Nap + idle system sleep for the app's lifetime.
+        // This MUST happen before the HomeKit monitor and bridge server
+        // spin up, so their timers/WS pings are never throttled even
+        // momentarily. See the comment on `activityToken` for the full
+        // rationale (headless accessory apps are the canonical App Nap
+        // target; throttling stalls lock commands + WS keepalive).
+        activityToken = ProcessInfo.processInfo.beginActivity(
+            options: [.idleSystemSleepDisabled, .automaticTerminationDisabled, .suddenTerminationDisabled],
+            reason: "HomeKit lock bridge must stay awake and unthrottled while running"
+        )
+        FileHandle.standardError.write(Data("[lockbridge-server] App Nap + idle sleep disabled (beginActivity held)\n".utf8))
 
         // Fourth layer: set again here, in case the scene system already
         // resurrected something. The snapshot-based rogue detection in

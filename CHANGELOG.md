@@ -4,6 +4,35 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.5.9] — 2026-06-05
+
+### Fixed
+- **Bridge no longer gets throttled by App Nap when its window is hidden.**
+  A headless `.accessory`-policy app with no visible window is the
+  canonical App Nap target: macOS throttles the whole process, coalescing
+  both main-queue `asyncAfter` retry timers AND NIO-scheduled WebSocket
+  ping tasks. Symptom: lock commands would stall and HA's WebSocket could
+  time out (the bridge pings every 15s; HA closes after 30s of silence)
+  while the status window was hidden — and snap back to life the instant
+  the window was opened, because making the app visible releases App Nap.
+  The bridge now holds a process-lifetime
+  `ProcessInfo.beginActivity(options: [.idleSystemSleepDisabled,
+  .automaticTerminationDisabled, .suddenTerminationDisabled])` assertion,
+  acquired before the HomeKit monitor and server start. This disables App
+  Nap process-wide (un-throttling retry timers and the WS keepalive
+  together) and additionally prevents idle system sleep — a sleeping Mac
+  is a down bridge. Chosen over the `NSAppSleepDisabled` Info.plist key
+  because (a) the plist key only addresses App Nap, not system sleep, and
+  (b) Catalyst has a documented history of silently ignoring Info.plist
+  keys in this project, whereas `beginActivity` is a Foundation call that
+  definitely executes.
+  Note: `.idleSystemSleepDisabled` prevents *idle* sleep, not lid-close or
+  a manual sleep — correct for a desktop/Mac-mini bridge; keep the system
+  Energy Saver "never sleep" setting as belt-and-suspenders.
+
+### Changed
+- `MARKETING_VERSION` 0.5.8 → 0.5.9, `CURRENT_PROJECT_VERSION` 10 → 11.
+
 ## [0.5.8] — 2026-06-05
 
 ### Removed
