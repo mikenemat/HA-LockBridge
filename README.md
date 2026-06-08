@@ -11,25 +11,26 @@ itself as a *second* HomeKit controller in your home and exposes its accessories
 to HA over a local HTTP + WebSocket API. The lock stays paired with Apple Home;
 HA just gets read/write access through the bridge.
 
-> [!IMPORTANT]
-> **You need an always-on Mac.** HA-LockBridge is a macOS app — it must run on a
-> Mac (a mini, an iMac, or any Mac left powered on) that **stays awake**, is
-> signed into the iCloud account your Apple Home uses, and runs **macOS 15
-> (Sequoia) or newer**. There is no iOS, iPad, Apple TV, or standalone-hardware
-> version; the bridge has to be a logged-in macOS controller in your home. See
-> [Requirements](#requirements) for details.
-
-> [!IMPORTANT]
-> **The app must stay in the foreground, and it will steal focus.** Apple's
-> HomeKit only lets an app control accessories (lock/unlock) while it is the
-> **frontmost, active app** — a backgrounded app's commands get deferred or
-> stalled. This is an **Apple limitation with no workaround**. So that locks
-> respond promptly, HA-LockBridge **grabs focus every time Home Assistant
-> sends a lock command**. On a **dedicated Mac mini** (nothing else running on
-> it) you'll never notice. On a Mac you actively use, expect the bridge to
-> jump to the front whenever a lock is operated — usable, but a little
-> annoying. **A dedicated Mac mini is strongly recommended.** See
-> [Runs as a foreground app](#runs-as-a-foreground-app--and-why).
+> [!CAUTION]
+> **HA-LockBridge has three hard environment requirements. Read these before you start.**
+>
+> - **An always-on Mac.** It's a macOS app — it must run on a Mac (mini, iMac,
+>   any Mac left powered on) that stays awake, is signed into your Apple Home's
+>   iCloud account, and runs **macOS 15 (Sequoia) or newer**. There is no iOS,
+>   iPad, Apple TV, or standalone-hardware version. See
+>   [Requirements](#requirements).
+> - **Foreground only, and it steals focus.** Apple's HomeKit lets an app
+>   control locks *only* while it is the **frontmost, active app** — an Apple
+>   limitation with no workaround. So HA-LockBridge grabs focus every time Home
+>   Assistant sends a lock command. **A dedicated Mac mini is strongly
+>   recommended**; on a Mac you actively use, it will jump to the front on every
+>   lock action. See [Runs as a foreground app](#runs-as-a-foreground-app--and-why).
+> - **An active display device.** A headless Mac with no display has no window
+>   context, so the app can't take focus and lock control silently fails. You
+>   need a **physical monitor, an HDMI dummy plug, or display software like
+>   [BetterDummy / BetterDisplay](https://github.com/waydabber/BetterDisplay)**
+>   attached or running at all times. Screen Sharing alone is *not* enough — it
+>   only provides a display context while the session is open.
 
 ## Get the macOS app
 
