@@ -11,6 +11,15 @@ itself as a *second* HomeKit controller in your home and exposes its accessories
 to HA over a local HTTP + WebSocket API. The lock stays paired with Apple Home;
 HA just gets read/write access through the bridge.
 
+Other solutions — virtual/template switches and automations that sync states and
+actions between the two ecosystems — provide basic functionality, but are
+brittle. They rely on extensive manual configuration in *both* HomeKit and Home
+Assistant, and often fail silently or drift out of sync after minor outages and
+communication glitches. They also become frustrating to debug as you scale up to
+5–10 locks or more on a larger property. If you only have one or two locks, you
+should absolutely attempt that before going all-in on this option — here's a good
+[example writeup](https://nils.schimmelmann.us/2025-03-19-schlage-encode-plus-home-assistant/).
+
 > [!CAUTION]
 > **HA-LockBridge has three hard environment requirements. Read these before you start.**
 >
