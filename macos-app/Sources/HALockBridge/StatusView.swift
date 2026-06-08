@@ -281,10 +281,6 @@ struct StatusView: View {
             Text(Self.interactionTimeFormatter.string(from: event.timestamp))
                 .font(.caption.monospaced())
                 .foregroundColor(.secondary)
-            Text(event.clientAddress)
-                .font(.caption.monospaced())
-                .foregroundColor(.secondary)
-                .lineLimit(1)
         }
     }
 

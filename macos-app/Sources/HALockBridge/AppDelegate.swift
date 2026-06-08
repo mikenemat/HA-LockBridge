@@ -42,6 +42,10 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     // SwiftUI status window
     var statusVM: StatusViewModel?
     var mainWindow: UIWindow?
+    /// The app that was frontmost before we stole focus for a lock write
+    /// (an NSRunningApplication, via the Obj-C bridge). We hand focus back to
+    /// it once the write settles. nil when we owe no restore.
+    private var focusRestoreTarget: NSObject?
 
     func application(
         _ application: UIApplication,
@@ -67,8 +71,22 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         // HomeKit services accessory writes promptly only for the frontmost
         // app. Runs on the main thread (setLockState is main-thread).
         m.onWriteRequested = { [weak self] in
-            self?.activateApp()
-            self?.bringWindowToFront()
+            guard let self = self else { return }
+            // Remember who was in front, then take focus.
+            self.captureFocusTargetIfNeeded()
+            self.grabFocus()
+            // Re-assert shortly after: macOS 14+ cooperative activation can
+            // silently drop a self-activation that arrives without an
+            // activation token, so a single attempt occasionally doesn't
+            // take. A second pass a beat later makes it reliable.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                self?.grabFocus()
+            }
+        }
+        // When the last in-flight write settles, hand focus back to whatever
+        // app we stole it from — return things to how they were.
+        m.onAllWritesSettled = { [weak self] in
+            self?.restoreFocusTarget()
         }
         let cliCommand = Self.parseCommand(from: CommandLine.arguments)
         if let cmd = cliCommand {
@@ -295,16 +313,61 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     /// `activateIgnoringOtherApps:`.
     private func activateApp() {
         guard let nsApp = nsApp() else { return }
+        // Modern cooperative activate (macOS 14+).
         let newSel = NSSelectorFromString("activate")
         if nsApp.responds(to: newSel), let imp = nsApp.method(for: newSel) {
             typealias Fn = @convention(c) (NSObject, Selector) -> Void
             unsafeBitCast(imp, to: Fn.self)(nsApp, newSel)
-            return
         }
+        // Legacy forceful activate — deprecated, but it isn't gated on an
+        // activation token, so it's more reliable for a background app
+        // self-activating. Call BOTH (no early return); doubling up is
+        // harmless and noticeably more robust than either alone.
         let oldSel = NSSelectorFromString("activateIgnoringOtherApps:")
-        guard nsApp.responds(to: oldSel), let imp = nsApp.method(for: oldSel) else { return }
-        typealias OldFn = @convention(c) (NSObject, Selector, Bool) -> Void
-        unsafeBitCast(imp, to: OldFn.self)(nsApp, oldSel, true)
+        if nsApp.responds(to: oldSel), let imp = nsApp.method(for: oldSel) {
+            typealias OldFn = @convention(c) (NSObject, Selector, Bool) -> Void
+            unsafeBitCast(imp, to: OldFn.self)(nsApp, oldSel, true)
+        }
+    }
+
+    /// Make ourselves the active app AND lift our window to the front.
+    private func grabFocus() {
+        activateApp()
+        bringWindowToFront()
+    }
+
+    /// The current frontmost application (NSRunningApplication) via
+    /// NSWorkspace. nil if unavailable.
+    private func frontmostApp() -> NSObject? {
+        guard let cls = NSClassFromString("NSWorkspace") else { return nil }
+        guard let ws = (cls as AnyObject)
+            .perform(NSSelectorFromString("sharedWorkspace"))?
+            .takeUnretainedValue() as? NSObject else { return nil }
+        return ws.value(forKey: "frontmostApplication") as? NSObject
+    }
+
+    /// Before stealing focus, remember which app was frontmost so we can hand
+    /// it back once the write settles. Skips if we're already frontmost
+    /// (nothing to restore) or a capture is already outstanding for an
+    /// in-flight write batch (keep the original target — don't overwrite it
+    /// with ourselves on the second of two overlapping writes).
+    private func captureFocusTargetIfNeeded() {
+        guard focusRestoreTarget == nil else { return }
+        guard let app = frontmostApp() else { return }
+        let pid = (app.value(forKey: "processIdentifier") as? Int32) ?? -1
+        if pid == ProcessInfo.processInfo.processIdentifier { return }  // it's us
+        focusRestoreTarget = app
+    }
+
+    /// Hand focus back to the app we stole it from, if any. Called when the
+    /// last in-flight write settles (lock confirmed / reverted).
+    private func restoreFocusTarget() {
+        guard let app = focusRestoreTarget else { return }
+        focusRestoreTarget = nil
+        let sel = NSSelectorFromString("activateWithOptions:")
+        guard app.responds(to: sel), let imp = app.method(for: sel) else { return }
+        typealias Fn = @convention(c) (NSObject, Selector, UInt) -> Bool
+        _ = unsafeBitCast(imp, to: Fn.self)(app, sel, 0)  // 0 = default options
     }
 
     /// Order our window above everyone else. `orderFrontRegardless` isn't

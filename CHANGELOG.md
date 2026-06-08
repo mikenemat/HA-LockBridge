@@ -44,6 +44,21 @@ follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
     removed) and are individually scrollable (`LazyVStack` so long histories
     stay smooth). Each section header shows its live count, and the window
     grew to 840pt to fit the three scroll regions.
+  - **Focus is returned after a write.** Before stealing focus for a lock
+    command, the bridge records which app was frontmost; once the write
+    settles (lock confirmed / reverted) it hands focus back, returning
+    things to how they were. Focus-steal is also moved *after* the
+    accessory-validity guards (an unknown-accessory request no longer yanks
+    focus) and only restores once the *last* of any overlapping writes
+    settles.
+  - **More robust focus acquisition.** `activateApp` now calls both the
+    modern cooperative `activate()` and the legacy
+    `activateIgnoringOtherApps:` (the latter isn't gated on an activation
+    token, so it's more reliable for a background self-activation), plus a
+    second re-assert ~0.2s later — fixing occasional cases where a single
+    activation didn't take.
+  - **Recent activity row drops the client IP** (redundant with the
+    HA-connected line in the footer); just the timestamp remains.
 - **READMEs + CLAUDE.md** document the foreground-app behavior and the
   dedicated-Mac requirement.
 - `MARKETING_VERSION` 0.5.11 → 0.6.0, `CURRENT_PROJECT_VERSION` 13 → 14

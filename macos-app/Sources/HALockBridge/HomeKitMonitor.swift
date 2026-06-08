@@ -111,6 +111,21 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     /// a write request is our cue to grab focus. See the README's appliance
     /// section for the full rationale. Optional so CLI/test paths no-op.
     var onWriteRequested: (() -> Void)?
+
+    /// Fired on the main thread when the last in-flight lock write resolves
+    /// (success, revert, or external satisfaction) and no writes remain
+    /// pending. AppDelegate uses this to hand focus back to whatever app was
+    /// frontmost before we stole it for the write. Optional so CLI/test
+    /// paths no-op.
+    var onAllWritesSettled: (() -> Void)?
+
+    /// Fire `onAllWritesSettled` when no background writes remain pending.
+    /// Called at every terminal write resolution so focus can be returned to
+    /// the app we stole it from — but only once the *last* concurrent write
+    /// finishes, so overlapping commands don't bounce focus around.
+    private func notifyIfAllWritesSettled() {
+        if pendingWrites.isEmpty { onAllWritesSettled?() }
+    }
     /// Accessories whose SerialNumber characteristic exists but failed all
     /// retry attempts. Treated as "no serial available, ever" — the cache
     /// commits the fallback HMAccessory.uniqueIdentifier instead of
@@ -306,11 +321,6 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     /// backward-compatibility with BridgeServer's response mapping but
     /// are unused on this path.
     func setLockState(id: UUID, target: Int, completion: @escaping (SetLockResult) -> Void) {
-        // HA wants to write — grab focus immediately so the app is frontmost
-        // by the time (and for the retries during which) HomeKit services
-        // the write. Fired unconditionally up front; harmless if the write
-        // ultimately can't proceed.
-        onWriteRequested?()
         // Resolve the wire ID HA sent us to the HMAccessory UUID. See the
         // comment on `wireIDToHMUUID` for why this exists.
         let hmID = wireIDToHMUUID[id] ?? id
@@ -321,6 +331,12 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
               let targetChar = service.characteristics.first(where: { $0.characteristicType == HMCharacteristicTypeTargetLockMechanismState }) else {
             completion(.homekitError("lock characteristic missing")); return
         }
+
+        // HA wants a (valid) write — grab focus now so the app is frontmost
+        // for the write and its retries. Placed after the guards so an
+        // unknown-accessory request never yanks focus for nothing (and so we
+        // don't owe a focus-restore for a write that never started).
+        onWriteRequested?()
 
         // Cancel any prior in-flight write for this accessory. The user
         // has changed their mind (e.g. tapped Unlock while a previous Lock
@@ -467,6 +483,7 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             // success never opens an event in the first place).
             self.closeWriteRetryEvent(pending: pending, outcome: .succeeded)
             self.recomputeAndPublish(for: accessory, reason: "post-write")
+            self.notifyIfAllWritesSettled()
         }
     }
 
@@ -541,6 +558,7 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         pending.completed = true
         pendingWrites.removeValue(forKey: hmID)
         lastTargetChange.removeValue(forKey: hmID)
+        defer { notifyIfAllWritesSettled() }
 
         let liveCurrent: Int? = accessory.services
             .flatMap { $0.characteristics }
@@ -662,6 +680,7 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         if let pending = pendingWrites.removeValue(forKey: id) {
             pending.completed = true
         }
+        notifyIfAllWritesSettled()
         reachabilityRecoveryWaiters.removeValue(forKey: id)
         // If we were tracking an open reachability gap, drop it on the
         // floor — the accessory is gone, the gap duration is moot and
@@ -1113,6 +1132,7 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             pending.completed = true
             pendingWrites.removeValue(forKey: id)
             closeWriteRetryEvent(pending: pending, outcome: .satisfiedExternally)
+            notifyIfAllWritesSettled()
             // Clearing the transition window lets deriveLifecycle return
             // a stable "locked"/"unlocked" since current==target. We don't
             // change `newState.lifecycleState` here — the next
