@@ -106,12 +106,12 @@ struct StatusView: View {
 
     private var debugView: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // Live activity header — most-recent-first, updates as events
-            // arrive via @Published recentInteractions on the view model.
+            // Live activity — most-recent-first, full history for the app
+            // run (scrollable; LazyVStack so a long history stays smooth).
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Image(systemName: "arrow.left.arrow.right")
-                    Text("Recent activity").font(.headline)
+                    Text("Recent activity (\(viewModel.recentInteractions.count))").font(.headline)
                     Spacer()
                 }
                 if viewModel.recentInteractions.isEmpty {
@@ -120,9 +120,15 @@ struct StatusView: View {
                         .foregroundColor(.secondary)
                         .padding(.leading, 22)
                 } else {
-                    ForEach(viewModel.recentInteractions) { event in
-                        interactionRow(event)
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 4) {
+                            ForEach(viewModel.recentInteractions) { event in
+                                interactionRow(event)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .frame(maxHeight: 150)
                 }
             }
 
@@ -133,7 +139,7 @@ struct StatusView: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Image(systemName: "exclamationmark.triangle")
-                    Text("Lock Errors/Warnings").font(.headline)
+                    Text("Lock Errors/Warnings (\(viewModel.recentLockEvents.count))").font(.headline)
                     Spacer()
                 }
                 if viewModel.recentLockEvents.isEmpty {
@@ -143,14 +149,14 @@ struct StatusView: View {
                         .padding(.leading, 22)
                 } else {
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 4) {
+                        LazyVStack(alignment: .leading, spacing: 4) {
                             ForEach(viewModel.recentLockEvents) { event in
                                 lockEventRow(event)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxHeight: 240)
+                    .frame(maxHeight: 200)
                 }
             }
 
@@ -162,7 +168,7 @@ struct StatusView: View {
                 Spacer()
             }
             ScrollView {
-                VStack(alignment: .leading, spacing: 4) {
+                LazyVStack(alignment: .leading, spacing: 4) {
                     if viewModel.accessories.isEmpty {
                         Text("(none discovered yet)")
                             .font(.callout)
@@ -187,7 +193,7 @@ struct StatusView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxHeight: 280)
+            .frame(maxHeight: 200)
 
             // Live HA connectivity (wire-level: is a WebSocket open now).
             HStack(spacing: 6) {

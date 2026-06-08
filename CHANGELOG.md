@@ -38,6 +38,12 @@ follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
   - **The window can't be closed or minimized** (`disableWindowDismissal`
     hides those buttons) — either would background the app and break writes.
     Quit via the in-window button or ⌘Q.
+  - **Full, scrollable event history.** Both the *Recent activity* and *Lock
+    Errors/Warnings* sections now retain their entire history for the app
+    run (the ring-buffer caps of 50 / 100 and the 3 / 20 display limits are
+    removed) and are individually scrollable (`LazyVStack` so long histories
+    stay smooth). Each section header shows its live count, and the window
+    grew to 840pt to fit the three scroll regions.
 - **READMEs + CLAUDE.md** document the foreground-app behavior and the
   dedicated-Mac requirement.
 - `MARKETING_VERSION` 0.5.11 → 0.6.0, `CURRENT_PROJECT_VERSION` 13 → 14

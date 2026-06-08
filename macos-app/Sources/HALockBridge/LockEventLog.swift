@@ -69,21 +69,18 @@ final class LockEventLog {
 
     private let lock = NSLock()
     private var events: [Event] = []
-    /// Larger than InteractionLog's 50 — this log is meant to be a
-    /// health *history* the user can review, not a wire-traffic peek.
-    private let capacity: Int = 100
+    // Intentionally UNBOUNDED — the full health history is retained for the
+    // entire app run (the Stats page scrolls it). Event rate is low (lock
+    // operations + reachability gaps), so this stays small in practice.
 
     /// Fires after each `record(_:)` or `update(id:_:)`. AppDelegate
-    /// subscribes and pushes the updated `recent(_:)` snapshot into
-    /// StatusViewModel so the Stats page repaints.
+    /// subscribes and pushes the full history into StatusViewModel so the
+    /// Stats page repaints.
     var onChange: (() -> Void)?
 
     func record(_ event: Event) {
         lock.lock()
         events.append(event)
-        if events.count > capacity {
-            events.removeFirst(events.count - capacity)
-        }
         lock.unlock()
         onChange?()
     }
@@ -91,8 +88,7 @@ final class LockEventLog {
     /// In-place update of an event by ID. Used to advance an open
     /// `.writeRetry` event's `attempts` / `durationMs` / `outcome` as
     /// the retry loop progresses, and to close an open
-    /// `.unreachableGap` event with its final duration. No-op if the
-    /// event has already aged out of the ring buffer.
+    /// `.unreachableGap` event with its final duration.
     func update(id: UUID, transform: (inout Event) -> Void) {
         lock.lock()
         var changed = false
@@ -120,10 +116,9 @@ final class LockEventLog {
         return nil
     }
 
-    /// Most-recent first, up to `count` events. The Stats page caps
-    /// display at this length.
-    func recent(_ count: Int = 20) -> [Event] {
+    /// The entire history, most-recent first.
+    func all() -> [Event] {
         lock.lock(); defer { lock.unlock() }
-        return Array(events.suffix(count).reversed())
+        return events.reversed()
     }
 }

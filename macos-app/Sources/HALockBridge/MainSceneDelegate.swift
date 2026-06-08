@@ -7,7 +7,10 @@ import SwiftUI
 final class MainSceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
 
-    private static let windowSize = CGSize(width: 440, height: 720)
+    // Taller in 0.6.0 (was 720): the debug panel now has three independent
+    // scroll regions — Recent activity, Lock Errors/Warnings, and Locks
+    // tracked — each retaining full history for the app run.
+    private static let windowSize = CGSize(width: 440, height: 840)
 
     func scene(
         _ scene: UIScene,

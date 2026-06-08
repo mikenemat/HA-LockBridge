@@ -104,7 +104,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             let interactionLog = InteractionLog()
             interactionLog.onChange = { [weak self, weak viewModel] in
                 guard let log = self?.interactionLog else { return }
-                let snapshot = log.recent(3)
+                let snapshot = log.all()
                 Task { @MainActor in
                     viewModel?.recentInteractions = snapshot
                 }
@@ -114,7 +114,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             let lockEventLog = LockEventLog()
             lockEventLog.onChange = { [weak self, weak viewModel] in
                 guard let log = self?.lockEventLog else { return }
-                let snapshot = log.recent(20)
+                let snapshot = log.all()
                 Task { @MainActor in
                     viewModel?.recentLockEvents = snapshot
                 }

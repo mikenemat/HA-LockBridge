@@ -36,28 +36,25 @@ final class InteractionLog {
 
     private let lock = NSLock()
     private var events: [Event] = []
-    /// Capacity is well above the display count of 3 so callers that want a
-    /// longer scrollback can pull more without us having to grow on demand.
-    private let capacity: Int = 50
+    // Intentionally UNBOUNDED — the full interaction history is retained for
+    // the entire app run (the Stats page scrolls it). At realistic lock-bridge
+    // event rates this is a few hundred bytes per entry, so even months of
+    // uptime is a modest, bounded-in-practice amount of memory.
 
     /// Fires after each `record(_:)`. AppDelegate subscribes and pushes the
-    /// updated `recent(_:)` into StatusViewModel so the debug view repaints.
+    /// full history into StatusViewModel so the debug view repaints.
     var onChange: (() -> Void)?
 
     func record(_ event: Event) {
         lock.lock()
         events.append(event)
-        if events.count > capacity {
-            events.removeFirst(events.count - capacity)
-        }
         lock.unlock()
         onChange?()
     }
 
-    /// Most-recent first, up to `count` events. Default 3 matches the
-    /// debug view's display count.
-    func recent(_ count: Int = 3) -> [Event] {
+    /// The entire history, most-recent first.
+    func all() -> [Event] {
         lock.lock(); defer { lock.unlock() }
-        return Array(events.suffix(count).reversed())
+        return events.reversed()
     }
 }
