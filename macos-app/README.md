@@ -101,8 +101,8 @@ Ctrl-C.
 
 Builds the .app (if needed) and copies it to `/Applications/HA-LockBridge.app`.
 
-To enable auto-start at login, launch the .app and click **Start at Login**
-in the menu bar icon — the app uses `SMAppService` to register itself as
+To enable auto-start at login, launch the .app and flip the **Start at Login**
+toggle in the app window — the app uses `SMAppService` to register itself as
 a Login Item. macOS surfaces this in System Settings → General → Login Items
 where it can be disabled at any time.
 
@@ -128,6 +128,13 @@ python3 Resources/generate_icon.py      # regenerate the app icon
 
 ## Caveats
 
+- **Appliance mode: the bridge runs as a visible foreground app**, not a
+  hidden menu-bar utility. It shows a Dock icon and an always-visible window,
+  keeps the display awake, and grabs focus when HA issues a lock command.
+  This is required, not cosmetic: HomeKit only services accessory *writes*
+  promptly for the frontmost/active app, so a backgrounded bridge can't
+  control locks without multi-second lag. Run it on a **dedicated Mac**; the
+  window can't be closed/minimized (use the in-window **Quit** or ⌘Q).
 - The bridge needs an active **GUI user session**. HomeKit access requires
   a logged-in user. On a dedicated Mac, enable auto-login.
 - HomeKit framework on macOS 15+ lives only in the iOSSupport SDK overlay,

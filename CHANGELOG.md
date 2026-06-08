@@ -4,6 +4,51 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.6.0] — 2026-06-06
+
+### Changed
+- **Appliance mode: the bridge is now a normal foreground app, not a hidden
+  menu-bar utility.** This is the fix for the long-running "locks respond
+  slowly unless the app is focused" problem. HomeKit only services accessory
+  *writes* promptly for the **frontmost/active app** — a backgrounded or
+  hidden controller has its writes deferred by tens of seconds or stalled
+  until something brings it forward. This is a documented HomeKit limitation,
+  confirmed empirically (foreground-active works instantly; foreground-
+  inactive and hidden both lag), with no API to opt out. So the app stops
+  fighting to be headless and instead embraces being a visible foreground
+  app on a dedicated Mac. Concretely:
+  - **No menu-bar tray icon.** `StatusBarController` and its template images
+    are removed entirely. All controls — **Start at Login**, **Reset
+    Pairing**, **Quit** — now live in the app window.
+  - **Always-visible window, `.regular` activation policy, `LSUIElement:
+    false`.** The four-layer window-hider, rogue-NSWindow neutralizing,
+    accessory-policy gymnastics, and the 5-second auto-hide on startup are
+    all gone. There are now only two screens: *waiting for pairing* and the
+    *stats/control panel* (with the pair approve/deny prompt shown inline as
+    a banner, and a reset-confirm overlay).
+  - **Grabs focus when HA issues a lock command.** `HomeKitMonitor` fires a
+    new `onWriteRequested` hook at the top of `setLockState`; AppDelegate
+    wires it to bring the app to the foreground/active so HomeKit services
+    the write promptly.
+  - **Keeps the display awake.** `beginActivity` options gain
+    `.idleDisplaySleepDisabled` (on top of `.userInitiated`) — the screen
+    lock is what drops an unattended Mac out of the active state, and its
+    timer is gated on the display sleeping, so keeping the display awake
+    keeps the session unlocked and the app frontmost.
+  - **The window can't be closed or minimized** (`disableWindowDismissal`
+    hides those buttons) — either would background the app and break writes.
+    Quit via the in-window button or ⌘Q.
+- **READMEs + CLAUDE.md** document the foreground-app behavior and the
+  dedicated-Mac requirement.
+- `MARKETING_VERSION` 0.5.11 → 0.6.0, `CURRENT_PROJECT_VERSION` 13 → 14
+  (minor bump — this is a significant UX/deployment change).
+
+### Why a minor version bump
+Existing users upgrading from 0.5.x will see the app stop hiding into the
+menu bar and start showing a Dock icon + window. Intended for a dedicated
+Mac; running it on a Mac you use interactively will lag lock commands
+whenever another app is frontmost.
+
 ## [0.5.11] — 2026-06-05
 
 ### Fixed

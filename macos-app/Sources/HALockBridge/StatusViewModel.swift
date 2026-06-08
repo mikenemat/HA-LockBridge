@@ -1,148 +1,95 @@
 import Foundation
 import Combine
 
-/// Source of truth for what the StatusView shows. AppDelegate observes
-/// `display` to drive window visibility + macOS activation policy.
+/// Source of truth for what the StatusView shows. In appliance mode the
+/// window is ALWAYS visible — there are only two real screens (waiting for
+/// the first pair, and the stats/control panel), plus a reset-confirm
+/// overlay. The old hidden/briefStatus/countdown states are gone: the app
+/// is a normal foreground app now (see AppDelegate / README for why —
+/// HomeKit only services accessory writes for the frontmost app).
 @MainActor
 final class StatusViewModel: ObservableObject {
 
     enum Display: Equatable {
         case initializing
-        case waitingForFirstPair
-        case pendingRequest(requestID: String, clientName: String)
-        case approved(countdown: Int)
-        case denied(countdown: Int)
-        case expired(countdown: Int)
-        case briefStatus(countdown: Int)
-        case debug(accessories: [AccessoryState], pairedCount: Int)
-        case resetConfirm
-        case hidden
+        case waiting        // waiting for the first HA to pair
+        case debug          // stats + controls panel (the main screen once paired)
+        case resetConfirm   // confirmation overlay for Reset Pairing
+    }
 
-        var isVisible: Bool {
-            if case .hidden = self { return false }
-            return true
-        }
+    struct PendingPair: Equatable {
+        let requestID: String
+        let clientName: String
     }
 
     @Published var display: Display = .initializing
     @Published var pairedCount: Int = 0
     @Published var accessoryCount: Int = 0
-    /// Most-recent-first list of recent HA↔bridge interactions, updated
-    /// live as events arrive. Surfaced in the debug view's header so the
-    /// user can watch activity flow without leaving the status window.
+    /// Live list of tracked accessories for the panel. Updated by the
+    /// HomeKit observer (replaces the snapshot the old `.debug(accessories:)`
+    /// enum case used to carry, since the panel is now always-on).
+    @Published var accessories: [AccessoryState] = []
+    /// Most-recent-first list of recent HA↔bridge interactions.
     @Published var recentInteractions: [InteractionLog.Event] = []
-    /// Most-recent-first list of lock health events (write retries and
-    /// reachability gaps). Surfaced in the debug view's "Lock
-    /// Errors/Warnings" section. Capped at the view's display count.
+    /// Most-recent-first list of lock health events (write retries + gaps).
     @Published var recentLockEvents: [LockEventLog.Event] = []
     /// Live remote-IP list for every currently-connected HA WebSocket.
-    /// Drives the green/red indicator in the debug view. Kept @Published
-    /// (vs. a snapshot value in the .debug enum case) so the indicator
-    /// updates while the page is already open — HA reconnect/disconnect
-    /// cycles change this in real time.
     @Published var connectedClients: [String] = []
+    /// Inline pair-approval prompt. Non-nil while a request is pending;
+    /// rendered as a banner above the main content in either screen.
+    @Published var pendingRequest: PendingPair?
+    /// Start-at-Login control state, surfaced as a toggle in the panel.
+    @Published var loginItemEnabled: Bool = false
+    @Published var loginItemAvailable: Bool = true
 
+    // Callbacks wired by AppDelegate.
     var onApprove: ((String) -> Void)?
     var onDeny: ((String) -> Void)?
     var onResetConfirmed: (() -> Void)?
-
-    private var countdownTask: Task<Void, Never>?
+    var onToggleLoginItem: (() -> Void)?
+    var onQuit: (() -> Void)?
 
     // MARK: - Transitions
 
-    func showWaitingForFirstPair() {
-        cancelCountdown()
-        display = .waitingForFirstPair
+    func showWaiting() { display = .waiting }
+    func showDebug() { display = .debug }
+    func showResetConfirm() { display = .resetConfirm }
+
+    /// Settle into the correct main screen based on pairing state, unless a
+    /// modal overlay (reset confirm) is currently up. Called on launch and
+    /// after a pairing finalizes / reset completes.
+    func refreshMainView() {
+        if display == .resetConfirm { return }
+        display = pairedCount > 0 ? .debug : .waiting
     }
 
-    func showBriefStatus(seconds: Int = 5) {
-        startCountdown(seconds: seconds) { .briefStatus(countdown: $0) }
-    }
+    // MARK: - Pair request banner
 
     func showPendingRequest(requestID: String, clientName: String) {
-        cancelCountdown()
-        display = .pendingRequest(requestID: requestID, clientName: clientName)
+        pendingRequest = PendingPair(requestID: requestID, clientName: clientName)
     }
 
-    func showApproved() {
-        startCountdown(seconds: 5, build: { .approved(countdown: $0) }, then: .hidden)
-    }
-
-    func showDenied() {
-        startCountdown(seconds: 5, build: { .denied(countdown: $0) }, then: .waitingForFirstPair)
-    }
-
-    func showExpired() {
-        startCountdown(seconds: 5, build: { .expired(countdown: $0) }, then: .waitingForFirstPair)
-    }
-
-    func showDebug(accessories: [AccessoryState], pairedCount: Int) {
-        cancelCountdown()
-        display = .debug(accessories: accessories, pairedCount: pairedCount)
-    }
-
-    func showResetConfirm() {
-        cancelCountdown()
-        display = .resetConfirm
-    }
-
-    func hide() {
-        cancelCountdown()
-        display = .hidden
+    func clearPendingRequest() {
+        pendingRequest = nil
     }
 
     // MARK: - Actions called from SwiftUI buttons
 
     func approveTapped() {
-        if case .pendingRequest(let id, _) = display {
-            onApprove?(id)
-        }
+        if let r = pendingRequest { onApprove?(r.requestID) }
     }
 
     func denyTapped() {
-        if case .pendingRequest(let id, _) = display {
-            onDeny?(id)
-        }
+        if let r = pendingRequest { onDeny?(r.requestID) }
     }
 
-    func confirmResetTapped() {
-        onResetConfirmed?()
-    }
+    func toggleLoginItemTapped() { onToggleLoginItem?() }
 
-    func cancelResetTapped() {
-        dismissOverlay()
-    }
+    func quitTapped() { onQuit?() }
 
-    /// Dismiss a manually-opened overlay (debug / resetConfirm). When no
-    /// clients are paired, return to the persistent waitingForFirstPair view
-    /// — going to .hidden would make the window AND Dock icon vanish, which
-    /// reads as a crash. With paired clients, hide is fine: the bridge is
-    /// expected to recede into the menu bar.
-    func dismissOverlay() {
-        if pairedCount == 0 {
-            showWaitingForFirstPair()
-        } else {
-            hide()
-        }
-    }
+    func resetTapped() { showResetConfirm() }
 
-    // MARK: - Countdown helper
+    func confirmResetTapped() { onResetConfirmed?() }
 
-    private func startCountdown(seconds: Int, build: @escaping (Int) -> Display, then finalDisplay: Display = .hidden) {
-        cancelCountdown()
-        countdownTask = Task { [weak self] in
-            for i in stride(from: seconds, through: 1, by: -1) {
-                if Task.isCancelled { return }
-                await MainActor.run { self?.display = build(i) }
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-            }
-            if Task.isCancelled { return }
-            await MainActor.run { self?.display = finalDisplay }
-        }
-    }
-
-    private func cancelCountdown() {
-        countdownTask?.cancel()
-        countdownTask = nil
-    }
+    func cancelResetTapped() { refreshMainView() }
 }

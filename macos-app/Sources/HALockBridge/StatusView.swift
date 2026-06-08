@@ -4,35 +4,27 @@ struct StatusView: View {
     @ObservedObject var viewModel: StatusViewModel
 
     var body: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 16) {
             Text("HA-LockBridge")
                 .font(.title2.bold())
+
+            // Inline pair-approval banner — shown above whichever main
+            // screen is up, in both waiting and paired states (a second HA
+            // can request pairing while the first is connected).
+            if let pending = viewModel.pendingRequest {
+                pairBanner(pending)
+            }
 
             Group {
                 switch viewModel.display {
                 case .initializing:
                     initializingView
-                case .waitingForFirstPair:
+                case .waiting:
                     waitingView
-                case .pendingRequest(_, let clientName):
-                    pendingView(clientName: clientName)
-                case .approved(let n):
-                    resultView(systemImage: "checkmark.circle.fill", color: .green,
-                               title: "Paired!", countdown: n)
-                case .denied(let n):
-                    resultView(systemImage: "xmark.circle.fill", color: .red,
-                               title: "Pairing denied", countdown: n)
-                case .expired(let n):
-                    resultView(systemImage: "clock.badge.exclamationmark.fill", color: .orange,
-                               title: "Pairing request expired", countdown: n)
-                case .briefStatus(let n):
-                    briefStatusView(countdown: n)
-                case .debug(let accessories, let pairedCount):
-                    debugView(accessories: accessories, pairedCount: pairedCount)
+                case .debug:
+                    debugView
                 case .resetConfirm:
                     resetConfirmView
-                case .hidden:
-                    EmptyView()
                 }
             }
             .frame(maxWidth: .infinity)
@@ -55,9 +47,36 @@ struct StatusView: View {
         .padding(28)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.easeInOut(duration: 0.2), value: viewModel.display)
+        .animation(.easeInOut(duration: 0.2), value: viewModel.pendingRequest)
     }
 
-    // MARK: - Sub-views
+    // MARK: - Pair banner (shown inline, not as a separate screen)
+
+    private func pairBanner(_ pending: StatusViewModel.PendingPair) -> some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "lock.shield.fill")
+                    .foregroundColor(.accentColor)
+                Text("Pair request from")
+                    .foregroundColor(.secondary)
+                Text(pending.clientName)
+                    .font(.body.bold())
+            }
+            HStack(spacing: 12) {
+                Button("Deny", role: .destructive) { viewModel.denyTapped() }
+                    .keyboardShortcut(.escape, modifiers: [])
+                    .buttonStyle(.bordered)
+                Button("Approve") { viewModel.approveTapped() }
+                    .keyboardShortcut(.return, modifiers: [])
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity)
+        .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    // MARK: - Screens
 
     private var initializingView: some View {
         VStack(spacing: 12) {
@@ -79,64 +98,13 @@ struct StatusView: View {
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 8)
+
+            Divider().padding(.vertical, 4)
+            controlBar
         }
     }
 
-    private func pendingView(clientName: String) -> some View {
-        VStack(spacing: 14) {
-            Image(systemName: "lock.shield.fill")
-                .font(.system(size: 44))
-                .foregroundColor(.accentColor)
-            Text("Pair request")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-            Text(clientName)
-                .font(.title3.bold())
-                .multilineTextAlignment(.center)
-            HStack(spacing: 12) {
-                Button("Deny", role: .destructive) {
-                    viewModel.denyTapped()
-                }
-                .keyboardShortcut(.escape, modifiers: [])
-                .buttonStyle(.bordered)
-
-                Button("Approve") {
-                    viewModel.approveTapped()
-                }
-                .keyboardShortcut(.return, modifiers: [])
-                .buttonStyle(.borderedProminent)
-            }
-            .padding(.top, 4)
-        }
-    }
-
-    private func resultView(systemImage: String, color: Color, title: String, countdown: Int) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: systemImage)
-                .font(.system(size: 44))
-                .foregroundColor(color)
-            Text(title)
-                .font(.headline)
-            Text("Window will hide in \(countdown)…")
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
-    }
-
-    private func briefStatusView(countdown: Int) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: "checkmark.shield.fill")
-                .font(.system(size: 44))
-                .foregroundColor(.green)
-            Text("Bridge is running")
-                .font(.headline)
-            Text("Window will hide in \(countdown)…")
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
-    }
-
-    private func debugView(accessories: [AccessoryState], pairedCount: Int) -> some View {
+    private var debugView: some View {
         VStack(alignment: .leading, spacing: 10) {
             // Live activity header — most-recent-first, updates as events
             // arrive via @Published recentInteractions on the view model.
@@ -160,12 +128,8 @@ struct StatusView: View {
 
             Divider()
 
-            // "Lock Errors/Warnings" — surfaces the rough edges that the
-            // bridge handles transparently (background-write retries,
-            // reachability gaps) so the user can see when the system
-            // is healing things on their behalf. Empty state shows
-            // "(no warnings)" so users know it's working as intended,
-            // not a missing feature.
+            // "Lock Errors/Warnings" — surfaces the rough edges the bridge
+            // handles transparently (write retries, reachability gaps).
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Image(systemName: "exclamationmark.triangle")
@@ -186,12 +150,6 @@ struct StatusView: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    // Cap at 240pt (was 140 in 0.5.3) — paired with the
-                    // window-height bump in 0.5.5, this lets ~10+ event
-                    // rows show at once when populated. The empty state
-                    // takes the if-branch above and skips the ScrollView
-                    // entirely, so this cap is "free" when there are no
-                    // warnings to show.
                     .frame(maxHeight: 240)
                 }
             }
@@ -200,17 +158,17 @@ struct StatusView: View {
 
             HStack {
                 Image(systemName: "stethoscope")
-                Text("Locks tracked (\(accessories.count))").font(.headline)
+                Text("Locks tracked (\(viewModel.accessories.count))").font(.headline)
                 Spacer()
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
-                    if accessories.isEmpty {
+                    if viewModel.accessories.isEmpty {
                         Text("(none discovered yet)")
                             .font(.callout)
                             .foregroundColor(.secondary)
                     } else {
-                        ForEach(accessories, id: \.id) { acc in
+                        ForEach(viewModel.accessories, id: \.id) { acc in
                             DisclosureGroup {
                                 Text(Self.jsonString(for: acc))
                                     .font(.caption.monospaced())
@@ -229,12 +187,9 @@ struct StatusView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxHeight: 320)
-            // Live HA connectivity. `pairedCount` below is config-level
-            // (does HA have a token at all); this line is wire-level (is HA
-            // currently holding a WebSocket open). Reads viewModel directly
-            // so it updates in real time as HA connects/disconnects while
-            // this page is open.
+            .frame(maxHeight: 280)
+
+            // Live HA connectivity (wire-level: is a WebSocket open now).
             HStack(spacing: 6) {
                 Image(systemName: "circle.fill")
                     .imageScale(.small)
@@ -250,17 +205,56 @@ struct StatusView: View {
             .font(.caption)
             .foregroundColor(.secondary)
             .textSelection(.enabled)
-            Text(pairedCount > 0 ? "Bridge is paired with Home Assistant." : "No Home Assistant paired.")
-                .font(.caption)
+
+            Divider()
+            controlBar
+        }
+    }
+
+    /// Start-at-Login / Reset Pairing / Quit — the controls that used to live
+    /// in the menu-bar dropdown, now inline since there's no tray icon.
+    private var controlBar: some View {
+        HStack(spacing: 12) {
+            Toggle("Start at Login", isOn: Binding(
+                get: { viewModel.loginItemEnabled },
+                set: { _ in viewModel.toggleLoginItemTapped() }
+            ))
+            .toggleStyle(.switch)
+            .disabled(!viewModel.loginItemAvailable)
+            .font(.callout)
+
+            Spacer()
+
+            Button("Reset Pairing…", role: .destructive) { viewModel.resetTapped() }
+                .buttonStyle(.bordered)
+            Button("Quit") { viewModel.quitTapped() }
+                .buttonStyle(.bordered)
+        }
+    }
+
+    private var resetConfirmView: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 44))
+                .foregroundColor(.orange)
+            Text("Reset pairing?").font(.headline)
+            Text("This wipes all paired Home Assistant clients on the bridge. Connected HAs will lose access immediately and need to re-pair.")
+                .font(.callout)
                 .foregroundColor(.secondary)
-            HStack {
-                Spacer()
-                Button("Close") { viewModel.dismissOverlay() }
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 8)
+            HStack(spacing: 12) {
+                Button("Cancel") { viewModel.cancelResetTapped() }
+                    .keyboardShortcut(.escape, modifiers: [])
+                    .buttonStyle(.bordered)
+                Button("Reset", role: .destructive) { viewModel.confirmResetTapped() }
                     .keyboardShortcut(.return, modifiers: [])
                     .buttonStyle(.borderedProminent)
             }
         }
     }
+
+    // MARK: - Rows
 
     private func interactionRow(_ event: InteractionLog.Event) -> some View {
         HStack(spacing: 6) {
@@ -288,12 +282,7 @@ struct StatusView: View {
         }
     }
 
-    /// Render one lock health event. Color + icon convey severity at a
-    /// glance: orange triangle for in-progress / resolved-successfully,
-    /// red for revert (the only "user actually lost the operation"
-    /// outcome). Reachability gaps follow the same color scheme — open
-    /// gaps are orange (system is currently degraded but healing-eligible),
-    /// closed gaps render in neutral text since they're historical.
+    /// Render one lock health event. Color + icon convey severity at a glance.
     private func lockEventRow(_ event: LockEventLog.Event) -> some View {
         let (icon, color, summary, detail) = Self.formatLockEvent(event)
         return HStack(spacing: 6) {
@@ -318,8 +307,7 @@ struct StatusView: View {
         }
     }
 
-    /// Returns (icon, color, leading-summary, trailing-detail) for a
-    /// lock event. Split out so the row body stays declarative.
+    /// Returns (icon, color, leading-summary, trailing-detail) for a lock event.
     private static func formatLockEvent(_ event: LockEventLog.Event) -> (String, Color, String, String) {
         switch event.kind {
         case .writeRetry(let action, let attempts, let durationMs, let outcome):
@@ -393,27 +381,5 @@ struct StatusView: View {
             return "(encode failed)"
         }
         return string
-    }
-
-    private var resetConfirmView: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 44))
-                .foregroundColor(.orange)
-            Text("Reset pairing?").font(.headline)
-            Text("This wipes all paired Home Assistant clients on the bridge. Connected HAs will lose access immediately and need to re-pair.")
-                .font(.callout)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 8)
-            HStack(spacing: 12) {
-                Button("Cancel") { viewModel.cancelResetTapped() }
-                    .keyboardShortcut(.escape, modifiers: [])
-                    .buttonStyle(.bordered)
-                Button("Reset", role: .destructive) { viewModel.confirmResetTapped() }
-                    .keyboardShortcut(.return, modifiers: [])
-                    .buttonStyle(.borderedProminent)
-            }
-        }
     }
 }

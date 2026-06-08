@@ -47,14 +47,23 @@ app, etc.) — it never disrupts the primary pairing.
    locally with a free Personal Team will see 7-day profile rotation —
    that's expected, just rebuild.
 
-3. **Catalyst auto-creates a UIWindowScene at launch even when LSUIElement
-   is set.** We work around this with a four-layer defense:
-   `setActivationPolicy(.accessory)` via NSApplication bridge at static-init,
-   `init`, `willFinishLaunching`, `didFinishLaunching`, plus an
-   `installWindowHider` polling burst. A SwiftUI status window is shown
-   deliberately during pairing — visibility is toggled via dynamic activation
-   policy. **Do not** try to fully prevent the window with Info.plist
-   trickery — it's been tried (see git history), Catalyst ignores it.
+3. **Appliance mode: the app is a normal foreground app, NOT a hidden
+   menu-bar utility** (changed in 0.6.0). It runs `.regular` with
+   `LSUIElement: false`, shows a Dock icon and a single always-visible
+   window, keeps the display awake (`beginActivity` with
+   `.idleDisplaySleepDisabled`), and **grabs focus when HA issues a lock
+   write** (`HomeKitMonitor.onWriteRequested` → `activateApp()`). This is
+   load-bearing, not cosmetic: HomeKit only services accessory *writes*
+   promptly for the **frontmost/active app** — a backgrounded controller has
+   its writes deferred tens of seconds or stalled (confirmed empirically;
+   it's a documented HomeKit limitation, see git history / the README
+   appliance section). The window's close + minimize buttons are hidden
+   (`disableWindowDismissal`) because either would background the app and
+   break writes; quit via the in-window button or ⌘Q.
+   **Do not** try to make this headless again (hidden window, `.accessory`
+   policy, menu-bar-only) — the entire prior four-layer window-hider +
+   `StatusBarController` apparatus was removed precisely because a hidden
+   bridge can't control locks. Run it on a dedicated Mac.
 
 4. **The bridge identifies itself via a UUID in Bonjour TXT records, not via
    hostname.** This is what makes Mac renames / IP changes survivable. The HA

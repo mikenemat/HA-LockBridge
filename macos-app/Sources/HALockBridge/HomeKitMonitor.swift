@@ -103,6 +103,14 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     /// (background-write retries, reachability gaps) silently no-op
     /// on the logging side; functional behavior is unaffected.
     var lockEventLog: LockEventLog?
+
+    /// Fired on the main thread at the start of every HA-initiated lock
+    /// write, before the HomeKit `writeValue`. AppDelegate wires this to
+    /// bring the app to the foreground / activate it — HomeKit (`homed`)
+    /// only services accessory writes promptly for the *frontmost* app, so
+    /// a write request is our cue to grab focus. See the README's appliance
+    /// section for the full rationale. Optional so CLI/test paths no-op.
+    var onWriteRequested: (() -> Void)?
     /// Accessories whose SerialNumber characteristic exists but failed all
     /// retry attempts. Treated as "no serial available, ever" — the cache
     /// commits the fallback HMAccessory.uniqueIdentifier instead of
@@ -298,6 +306,11 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     /// backward-compatibility with BridgeServer's response mapping but
     /// are unused on this path.
     func setLockState(id: UUID, target: Int, completion: @escaping (SetLockResult) -> Void) {
+        // HA wants to write — grab focus immediately so the app is frontmost
+        // by the time (and for the retries during which) HomeKit services
+        // the write. Fired unconditionally up front; harmless if the write
+        // ultimately can't proceed.
+        onWriteRequested?()
         // Resolve the wire ID HA sent us to the HMAccessory UUID. See the
         // comment on `wireIDToHMUUID` for why this exists.
         let hmID = wireIDToHMUUID[id] ?? id
