@@ -33,7 +33,7 @@ should absolutely attempt that before going all-in on this option — here's a g
 >   limitation with no workaround. So HA-LockBridge grabs focus every time Home
 >   Assistant sends a lock command. **A dedicated Mac mini is strongly
 >   recommended**; on a Mac you actively use, it will jump to the front on every
->   lock action. See [Runs as a foreground app](#runs-as-a-foreground-app--and-why).
+>   lock action.
 > - **An active display device.** A headless Mac with no display has no window
 >   context, so the app can't take focus and lock control silently fails. You
 >   need a **physical monitor, an HDMI dummy plug, or display software like
@@ -158,8 +158,7 @@ Apple Home lives on. On first launch:
 The bridge runs as a normal foreground app — a Dock icon and a single
 always-visible window showing **"Waiting for Home Assistant to pair"**. There
 is no menu-bar icon; all controls (Start at Login, Reset Pairing, Quit) live
-in the window. See [Runs as a foreground app](#runs-as-a-foreground-app--and-why)
-for why it stays in front.
+in the window.
 
 > **Contributors:** build instructions for the macOS app are in
 > [`macos-app/README.md`](macos-app/README.md). (Self-signing caveats are
@@ -183,34 +182,6 @@ Click **Configure** on the discovered card → **Submit**. The bridge's window
 switches to a pairing request with **Approve / Deny** buttons. Click **Approve**.
 HA's flow advances to the device-selection screen with your ThorBolts pre-checked.
 
-## Runs as a foreground app — and why
-
-HA-LockBridge runs as a **normal foreground Mac app**, not a hidden menu-bar
-utility. It shows a Dock icon and a single always-visible window, and it
-**comes to the front whenever Home Assistant sends a lock command**.
-
-This is deliberate. Apple's HomeKit only services accessory *writes*
-(lock/unlock) promptly for the **frontmost, active app** — a backgrounded or
-hidden controller has its writes deferred by tens of seconds, or stalled
-until something brings it forward. This is a documented HomeKit limitation,
-not something an app can opt out of (even Apple's own App Intents
-foreground-continuation API resolves "background work that needs a
-capability" by bringing the app to the foreground). So the bridge keeps
-itself visible and active, and grabs focus for the instant HA issues a write.
-
-What this means in practice:
-
-- **Run it on a dedicated Mac** — a Mac mini in a closet is ideal. The bridge
-  must be the active app to control locks reliably; if you actively use that
-  Mac for other things, lock commands lag whenever another app is frontmost.
-- **The window can't be closed or minimized** (either would background the
-  app). Stop the bridge with the in-window **Quit** button or ⌘Q.
-- **It keeps the display awake** so the screen never locks — a locked screen
-  drops the app out of the active state. Set the Mac to never sleep for best
-  results.
-- **All controls live in the window**: Start at Login, Reset Pairing, Quit.
-  There is no menu-bar icon.
-
 ## What survives without intervention
 
 - **Mac rename or IP change** → mDNS announces the new hostname for the same UUID; HA's stored entry auto-updates.
@@ -223,14 +194,14 @@ What this means in practice:
 
 | Component | Requirement |
 |---|---|
-| Bridge host | An **always-on, ideally dedicated Mac running macOS 15 (Sequoia) or newer**, signed into the iCloud account your Apple Home lives on, on the same LAN as a HomeKit resident (HomePod / Apple TV / iPad). It must stay awake, logged in, and with **HA-LockBridge as the frontmost app** — it runs as a visible foreground app (see ["Runs as a foreground app"](#runs-as-a-foreground-app--and-why)) and keeps the display awake. Using that Mac for other apps will delay lock commands. |
+| Bridge host | An **always-on, ideally dedicated Mac running macOS 15 (Sequoia) or newer**, signed into the iCloud account your Apple Home lives on, on the same LAN as a HomeKit resident (HomePod / Apple TV / iPad). It must stay awake, logged in, and with **HA-LockBridge as the frontmost app** — it runs as a visible foreground app and keeps the display awake. Using that Mac for other apps will delay lock commands. |
 | HomeAssistant | **2026.3+ recommended** — that release added the brand-icon proxy API the integration's logo uses. Manual installs on older HA versions still work fine; only the integration's logo won't appear. (HACS enforces 2026.3.0 as a hard minimum via `hacs.json`, so use the manual install to run on an earlier version.) |
 | Network | mDNS / Bonjour must traverse between the bridge host and HA. If HA runs in Docker without `--network=host`, mDNS discovery may need extra config. |
 
 ## Caveats
 
 - **The bridge is a controller, not a resident**: it needs an existing HomeKit resident (HomePod / Apple TV / HomePod mini / iPad) on the same network to relay commands when not on the local LAN. If you have those (and you do, if HomeKey works), nothing to configure.
-- **Bridge must run in a GUI user session, foreground**: HomeKit access requires a logged-in user, and prompt lock *control* requires the app to be frontmost (see ["Runs as a foreground app"](#runs-as-a-foreground-app--and-why)). On a dedicated Mac, enable auto-login + Start at Login so the bridge comes back frontmost after a reboot.
+- **Bridge must run in a GUI user session, foreground**: HomeKit access requires a logged-in user, and prompt lock *control* requires the app to be frontmost. On a dedicated Mac, enable auto-login + Start at Login so the bridge comes back frontmost after a reboot.
 
 ## License
 
