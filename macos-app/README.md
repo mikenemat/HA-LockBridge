@@ -144,9 +144,14 @@ python3 Resources/generate_icon.py      # regenerate the app icon
 
 End-user distribution is via the Mac App Store. The release flow is:
 
-1. Bump `MARKETING_VERSION` in `project.yml` and the version strings in
-   `BridgeServer.swift` (`hello` envelope + `/info`), `BonjourService.swift`
-   (TXT record), and `custom_components/ha_lockbridge/manifest.json`.
+1. Bump the version in `project.yml`: `MARKETING_VERSION` (the user-facing
+   version) and `CURRENT_PROJECT_VERSION` (the build number — must increase
+   for every App Store upload). Also bump `version` in
+   `custom_components/ha_lockbridge/manifest.json` if the HA integration
+   changed. The bridge's wire-protocol version strings (the WebSocket
+   `hello` envelope, `/info`, and the Bonjour TXT record) are derived
+   automatically from `CFBundleShortVersionString` as of 0.5.4 — no manual
+   edits needed there.
 2. Open `HALockBridge.xcodeproj` in Xcode.
 3. Select the **Generic Mac Catalyst Device** destination.
 4. Product → **Archive**. The archive shows up in Window → Organizer.
