@@ -220,14 +220,27 @@ struct StatusView: View {
     /// Start-at-Login / Reset Pairing / Quit — the controls that used to live
     /// in the menu-bar dropdown, now inline since there's no tray icon.
     private var controlBar: some View {
-        HStack(spacing: 12) {
-            Toggle("Start at Login", isOn: Binding(
-                get: { viewModel.loginItemEnabled },
-                set: { _ in viewModel.toggleLoginItemTapped() }
-            ))
-            .toggleStyle(.switch)
-            .disabled(!viewModel.loginItemAvailable)
-            .font(.callout)
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Toggle("Start at Login", isOn: Binding(
+                    get: { viewModel.loginItemEnabled },
+                    set: { _ in viewModel.toggleLoginItemTapped() }
+                ))
+                .toggleStyle(.switch)
+                .disabled(!viewModel.loginItemAvailable)
+                .font(.callout)
+
+                // Explain WHY the toggle is disabled, so "intentionally off"
+                // doesn't look like "broken". SMAppService only registers a
+                // login item from /Applications (or ~/Applications) — a
+                // build-folder / translocated dev build reports .notFound,
+                // which drives loginItemAvailable = false.
+                if !viewModel.loginItemAvailable {
+                    Text("Move the app to /Applications to enable")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
 
             Spacer()
 
