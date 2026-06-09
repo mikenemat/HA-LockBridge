@@ -55,11 +55,14 @@ final class StatusViewModel: ObservableObject {
     func showDebug() { display = .debug }
     func showResetConfirm() { display = .resetConfirm }
 
-    /// Settle into the correct main screen based on pairing state, unless a
-    /// modal overlay (reset confirm) is currently up. Called on launch and
-    /// after a pairing finalizes / reset completes.
+    /// Settle into the correct main screen based on pairing state — stats
+    /// panel if paired, waiting screen if not. Called on launch, after a
+    /// pairing finalizes, on reset-confirm **Cancel**, and after a reset
+    /// completes. All of those want to leave whatever transient screen is up,
+    /// INCLUDING the reset-confirm overlay — so there's deliberately no
+    /// "stay on resetConfirm" guard here (an earlier guard broke both the
+    /// Cancel button and the post-reset transition).
     func refreshMainView() {
-        if display == .resetConfirm { return }
         display = pairedCount > 0 ? .debug : .waiting
     }
 
