@@ -380,8 +380,17 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             _ = keyWin.perform(sel)
             return
         }
+        // Fallback (no key window — app wasn't active yet): front our content
+        // window, but SKIP system NSPanels. macOS parks text-services panels
+        // (Spelling & Grammar, Substitutions, Languages, dictation) in our
+        // window list; order-fronting those surfaces them as stray popups —
+        // the exact bug that returned when the old NSPanel-filtering
+        // window-hider was removed. Our SwiftUI content window is a plain
+        // NSWindow, so the class filter cleanly separates it from the panels.
         guard let windows = nsApp.value(forKey: "windows") as? [NSObject] else { return }
+        let panelCls = NSClassFromString("NSPanel")
         for w in windows where w.responds(to: sel) {
+            if let panelCls = panelCls, w.isKind(of: panelCls) { continue }
             _ = w.perform(sel)
         }
     }

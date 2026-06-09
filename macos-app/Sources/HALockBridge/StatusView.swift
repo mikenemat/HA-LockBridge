@@ -40,6 +40,8 @@ struct StatusView: View {
                 Text("·").foregroundColor(.secondary)
                 Image(systemName: "lock.fill").imageScale(.small)
                 Text("\(viewModel.accessoryCount) locks tracked")
+                Text("·").foregroundColor(.secondary)
+                Text("v\(Bundle.bridgeMarketingVersion)")
             }
             .font(.caption.monospaced())
             .foregroundColor(.secondary)

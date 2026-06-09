@@ -4,6 +4,26 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.6.2] — 2026-06-08
+
+### Fixed
+- **System text-services panels no longer pop up when the app grabs focus.**
+  On a pair request / lock command, `bringWindowToFront`'s no-key-window
+  fallback called `orderFrontRegardless` on *every* window in the app's list —
+  including the macOS **Spelling & Grammar / Substitutions / Languages**
+  NSPanels the system parks there — surfacing them as stray popups. The
+  NSPanel-skipping filter that used to prevent this lived in the window-hider
+  removed during the 0.6.0 appliance-mode refactor; a code path that needed it
+  (`bringWindowToFront`, still called on every focus-steal) survived without
+  it. The fallback now skips NSPanels and fronts only our content window.
+
+### Added
+- **Build version shown in the status-window footer** (e.g. `v0.6.2`), so the
+  running build is confirmable at a glance while debugging.
+
+### Changed
+- `MARKETING_VERSION` 0.6.1 → 0.6.2, `CURRENT_PROJECT_VERSION` 15 → 16.
+
 ## [0.6.1] — 2026-06-08
 
 ### Fixed
