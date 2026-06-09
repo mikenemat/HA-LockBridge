@@ -28,12 +28,12 @@ should absolutely attempt that before going all-in on this option — here's a g
 >   iCloud account, and runs **macOS 15 (Sequoia) or newer**. There is no iOS,
 >   iPad, Apple TV, or standalone-hardware version. See
 >   [Requirements](#requirements).
-> - **Foreground only, and it steals focus.** Apple's HomeKit lets an app
+> - **Foreground.** Apple's HomeKit lets an app
 >   control locks *only* while it is the **frontmost, active app** — an Apple
 >   limitation with no workaround. So HA-LockBridge grabs focus every time Home
 >   Assistant sends a lock command. **A dedicated Mac mini is strongly
 >   recommended**; on a Mac you actively use, it will jump to the front on every
->   lock action.
+>   lock action. It will restore focus within a few seconds.
 > - **An active display device.** A headless Mac with no display has no window
 >   context, so the app can't take focus and lock control silently fails. You
 >   need a **physical monitor, an HDMI dummy plug, or display software like
