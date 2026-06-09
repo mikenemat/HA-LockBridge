@@ -77,9 +77,7 @@ The companion **Home Assistant integration** is what lives in this repo (see
 
 ## Demo
 
-> ⚠️ **Placeholder — a new demo video is needed.** The previous clip is out of
-> date (it predates the foreground-app redesign and shows the old menu-bar UI).
-> A fresh recording of the current flow is TODO.
+https://github.com/user-attachments/assets/c5c490f5-7cfa-4938-8f27-a8e1e7de5c62
 
 ## Built for ThorBolt X1, works with any HomeKit lock
 
