@@ -41,17 +41,6 @@ should absolutely attempt that before going all-in on this option — here's a g
 >   attached or running at all times. Screen Sharing alone is *not* enough — it
 >   only provides a display context while the session is open.
 
-> [!TIP]
-> ✅ **Compatibility — focus-stealing is the *only* unusual behavior.**
-> Grabbing focus on a lock command does **not** break, disable, or interfere
-> with anything else on the Mac. The machine stays a completely normal macOS
-> install: background services, SSH, screen sharing, login items, and
-> **virtualization tools — UTM, VMware Fusion, Parallels, Docker — all keep
-> running untouched**. Hosting HA-LockBridge on a dedicated Mac mini *alongside*
-> your VMs and containers is fully supported; the app simply pops to the front
-> for the moment a lock is operated and then **hands focus back to whatever you
-> were running**.
-
 ## Get the macOS app
 
 **The macOS bridge is distributed exclusively through the Mac App Store.** That
