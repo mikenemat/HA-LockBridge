@@ -4,7 +4,19 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
-## [0.6.0] — 2026-06-06
+## [0.6.1] — 2026-06-08
+
+### Fixed
+- **Reset Pairing now transitions the view.** The reset-confirm **Cancel**
+  button (meant to return to the stats panel) and the post-reset transition
+  (meant to return to the waiting screen) both did nothing — an over-cautious
+  `if display == .resetConfirm { return }` guard in `refreshMainView()`
+  blocked the very paths that needed to leave that screen, so a reset left the
+  view stuck until an app restart. Removed the guard.
+- **"Start at Login" disabled state now explains itself.** When SMAppService
+  can't register a login item (app run from a build folder / translocated dev
+  build → status `.notFound`), the greyed-out toggle shows "Move the app to
+  /Applications to enable" instead of looking broken.
 
 ### Changed
 - **Appliance mode: the bridge is now a normal foreground app, not a hidden
@@ -61,8 +73,9 @@ follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
     HA-connected line in the footer); just the timestamp remains.
 - **READMEs + CLAUDE.md** document the foreground-app behavior and the
   dedicated-Mac requirement.
-- `MARKETING_VERSION` 0.5.11 → 0.6.0, `CURRENT_PROJECT_VERSION` 13 → 14
-  (minor bump — this is a significant UX/deployment change).
+- `MARKETING_VERSION` 0.5.11 → 0.6.1, `CURRENT_PROJECT_VERSION` 13 → 15
+  (minor bump — this is a significant UX/deployment change; 0.6.0 was an
+  in-development branch version, never released, folded into 0.6.1).
 
 ### Why a minor version bump
 Existing users upgrading from 0.5.x will see the app stop hiding into the
