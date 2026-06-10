@@ -1,0 +1,56 @@
+name: Release HA integration
+
+# When a GitHub release is published, package the Home Assistant custom
+# integration as a versioned zip and attach it to the release. This is for
+# people who install manually (not via HACS): download the zip from the
+# release, unzip it, and drop the `ha_lockbridge` folder into
+# <config>/custom_components/.
+#
+# The version in the filename comes from the integration's OWN
+# custom_components/ha_lockbridge/manifest.json, which is tracked
+# independently of the macOS app version. So a release tagged for the app
+# (e.g. v0.6.2) still produces ha_lockbridge-<manifest version>.zip — the
+# zip reflects the integration's real version, whatever the tag says.
+#
+# HACS users are unaffected: hacs.json has no `zip_release`, so HACS keeps
+# installing straight from the repo. This artifact is purely for manual
+# installs / archival.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch: {}   # manual run: builds the zip as a downloadable artifact (no release required)
+
+permissions:
+  contents: write         # required for `gh release upload`
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read integration version from manifest.json
+        id: meta
+        run: |
+          version=$(python3 -c "import json; print(json.load(open('custom_components/ha_lockbridge/manifest.json'))['version'])")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Integration version: $version"
+
+      - name: Build zip (contains the ha_lockbridge/ folder)
+        run: |
+          cd custom_components
+          zip -r "$GITHUB_WORKSPACE/ha_lockbridge-${{ steps.meta.outputs.version }}.zip" ha_lockbridge \
+            -x '*/__pycache__/*' '*.pyc' '*/.DS_Store'
+
+      - name: Upload as workflow artifact (always, so manual runs are testable)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ha_lockbridge-${{ steps.meta.outputs.version }}
+          path: ha_lockbridge-${{ steps.meta.outputs.version }}.zip
+
+      - name: Attach zip to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" "ha_lockbridge-${{ steps.meta.outputs.version }}.zip" --clobber
