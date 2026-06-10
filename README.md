@@ -153,12 +153,15 @@ in the window.
 
 ### 2. Install the HA integration
 
-Install via [HACS](https://hacs.xyz) by adding this repository as a custom integration repository, or manually:
+Pick whichever fits:
 
-```bash
-scp -r custom_components/ha_lockbridge \
-  <your-ha-host>:/config/custom_components/
-```
+- **HACS (recommended):** add this repository as a custom integration repository in [HACS](https://hacs.xyz), then install **HA-LockBridge**. HACS handles updates for you.
+- **Manual — release zip:** download the latest `ha_lockbridge-<version>.zip` from the [**Releases page**](https://github.com/mikenemat/HA-LockBridge/releases/latest), unzip it, and copy the resulting `ha_lockbridge` folder into `<config>/custom_components/`.
+- **Manual — from source:** copy the folder straight out of this repo:
+  ```bash
+  scp -r custom_components/ha_lockbridge \
+    <your-ha-host>:/config/custom_components/
+  ```
 
 Restart Home Assistant. Within ~10 seconds, **Settings → Devices & Services**
 shows a discovered **HA-LockBridge** card.

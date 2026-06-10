@@ -5,10 +5,15 @@ API exposed by the [Mac Catalyst bridge](../macos-app/).
 
 ## Install
 
-```bash
-scp -r custom_components/ha_lockbridge \
-  <your-ha-host>:/config/custom_components/
-```
+Pick whichever fits:
+
+- **HACS (recommended):** add this repository as a custom integration repository in HACS, then install **HA-LockBridge**.
+- **Manual — release zip:** download the latest `ha_lockbridge-<version>.zip` from the [Releases page](https://github.com/mikenemat/HA-LockBridge/releases/latest), unzip, and drop the `ha_lockbridge` folder into `<config>/custom_components/`.
+- **Manual — from source:**
+  ```bash
+  scp -r custom_components/ha_lockbridge \
+    <your-ha-host>:/config/custom_components/
+  ```
 
 Restart Home Assistant. The bridge announces itself via Bonjour, so a
 **HA-LockBridge** card should appear under *Settings → Devices & Services*
