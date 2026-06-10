@@ -38,31 +38,3 @@ jobs:
               if n.startswith('test_'):
                   getattr(t, n)(); print(f'  ok {n}')
           "
-
-  bridge-build:
-    name: Bridge — Xcode build (no signing)
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install xcodegen
-        run: brew install xcodegen
-      - name: Generate project
-        working-directory: macos-app
-        run: |
-          # CI doesn't have your team — stub the xcconfig with empty value
-          cp DevelopmentTeam.xcconfig.example DevelopmentTeam.xcconfig
-          sed -i '' 's/YOUR_TEAM_ID_HERE//' DevelopmentTeam.xcconfig
-          xcodegen generate
-      - name: Build without signing
-        working-directory: macos-app
-        run: |
-          xcodebuild \
-            -project HALockBridge.xcodeproj \
-            -scheme HALockBridge \
-            -configuration Release \
-            -destination 'platform=macOS,variant=Mac Catalyst' \
-            -derivedDataPath build \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            build

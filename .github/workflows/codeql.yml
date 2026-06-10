@@ -1,9 +1,8 @@
 name: CodeQL
 
-# Static analysis for the Python HA integration. Swift is not yet supported
-# by CodeQL (as of 2026) for general-purpose analysis, so the macOS app is
-# excluded — Apple's own ecosystem tooling catches Swift-specific issues at
-# build time and we run that in ci.yml.
+# Static analysis for the Python HA integration only. The macOS bridge app
+# is intentionally out of CI scope in this repo — it's built and shipped to
+# the App Store locally — so only the integration's Python is analyzed here.
 
 on:
   push:
