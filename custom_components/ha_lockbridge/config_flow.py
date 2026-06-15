@@ -374,14 +374,21 @@ class HALockBridgeOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         client = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
-        if client is not None and client.states:
-            accessories = list(client.states.values())
-        else:
-            accessories = await _fetch_accessories(
-                self.hass,
-                self.entry.data[CONF_HOST],
-                self.entry.data[CONF_PORT],
-                self.entry.data[CONF_TOKEN],
+        # Prefer the bridge's authoritative /accessories snapshot: it's keyed per
+        # physical accessory, so it can't carry the transient duplicate that
+        # client.states accumulates when a lock's wire id changes mid-run (a
+        # newly added lock is published first under a fallback id, then its
+        # stable serial-hash id, with no 'removed' for the old one). Fall back
+        # to local state only if the bridge is currently unreachable.
+        accessories = await _fetch_accessories(
+            self.hass,
+            self.entry.data[CONF_HOST],
+            self.entry.data[CONF_PORT],
+            self.entry.data[CONF_TOKEN],
+        )
+        if accessories is None:
+            accessories = (
+                list(client.states.values()) if (client and client.states) else None
             )
             if accessories is None:
                 return self.async_abort(reason="cannot_connect")
