@@ -228,7 +228,7 @@ struct StatusView: View {
                             } label: {
                                 HStack(spacing: 6) {
                                     Image(systemName: "lock.fill").imageScale(.small)
-                                    Text(acc.name).font(.callout)
+                                    Text(acc.displayName).font(.callout)
                                 }
                             }
                         }

@@ -427,6 +427,7 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             let computed = AccessoryState.from(
                 accessory: accessory,
                 info: infoCache[hmID] ?? [:],
+                homeName: homeManager.homes.count > 1 ? homeNameForAccessory[hmID] : nil,
                 lastTargetChange: lastTargetChange[hmID]
             )
             optimisticState = computed.with(target: target, lastTargetChange: lastTargetChange[hmID])
@@ -1197,6 +1198,10 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         let computed = AccessoryState.from(
             accessory: accessory,
             info: info,
+            // Display-only home prefix, surfaced only in multi-home setups.
+            // NOT fed into stableID or the identity cache (those still use the
+            // bare accessory name), so this can't reassign existing wire ids.
+            homeName: homeManager.homes.count > 1 ? homeNameForAccessory[id] : nil,
             lastTargetChange: lastTargetChange[id]
         )
 

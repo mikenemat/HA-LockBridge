@@ -105,9 +105,18 @@ class LockBridgeBaseEntity(Entity):
         manufacturer = acc.get("manufacturer") or "Unknown"
         model = acc.get("model") or "Unknown"
         sw_version = acc.get("firmware_version")
+        base_name = acc.get("name") or "Lock"
+        # Prefix the HomeKit home name when the bridge supplies one (it only does
+        # so for multi-home setups). Display-only: the device/entity identity is
+        # keyed on the wire id (`identifiers` / `unique_id`), never the name, so
+        # this only relabels an existing device — it never re-creates it, and
+        # the entity_id stays put. Falls back to the bare name for old bridges
+        # that don't send `home`.
+        home = acc.get("home")
+        display_name = f"{home} {base_name}" if home else base_name
         return DeviceInfo(
             identifiers={(DOMAIN, self._accessory_id)},
-            name=acc.get("name") or "Lock",
+            name=display_name,
             manufacturer=manufacturer,
             model=model,
             sw_version=sw_version,

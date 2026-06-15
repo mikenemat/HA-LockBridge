@@ -4,6 +4,27 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.6.5] — 2026-06-15
+
+### Added
+- **Lock names are prefixed with the HomeKit home name in multi-home setups.**
+  When the bridge sees more than one HomeKit home, it now sends the home name
+  alongside each lock, and both the app's lock list and Home Assistant display
+  it as `<Home> <Lock>` (e.g. "Beach House Front Door"). Single-home setups are
+  unchanged. In HA the prefix cascades to the lock's battery/jammed/low-battery
+  entities too, and the device-selection picker groups locks by home.
+
+  **Non-breaking by construction:** the home name is a new additive wire field
+  (`home`) that older integrations ignore and older bridges omit; it is never
+  part of a lock's wire id / HA `unique_id` / device identifiers, so existing
+  devices and entities are only **relabeled** — `entity_id`s, automations, and
+  pairings are untouched. Identity (`stableID` + the identity cache) still keys
+  on the bare accessory name.
+
+### Changed
+- `MARKETING_VERSION` 0.6.4 → 0.6.5, `CURRENT_PROJECT_VERSION` 18 → 19.
+- HA integration `manifest.json` 0.6.0 → 0.6.1.
+
 ## [0.6.4] — 2026-06-15
 
 Large hardening + features batch from the TODO.md backlog. **The Home Assistant

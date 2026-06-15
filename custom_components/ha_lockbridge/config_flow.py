@@ -61,9 +61,14 @@ def _partition(accessories: list[dict[str, Any]]) -> tuple[dict[str, str], dict[
     """
     thorbolt: dict[str, str] = {}
     other: dict[str, str] = {}
-    for acc in sorted(accessories, key=lambda a: (a.get("name") or "").lower()):
+    # Sort by home then name so multi-home setups group together in the picker.
+    for acc in sorted(
+        accessories, key=lambda a: ((a.get("home") or ""), (a.get("name") or "").lower())
+    ):
         bucket = thorbolt if acc.get("manufacturer") == THORBOLT_MANUFACTURER else other
-        label = acc.get("name") or acc["id"]
+        base = acc.get("name") or acc["id"]
+        home = acc.get("home")
+        label = f"{home} {base}" if home else base
         model = acc.get("model")
         if model:
             label = f"{label}  ({model})"

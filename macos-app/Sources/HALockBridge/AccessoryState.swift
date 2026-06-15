@@ -5,6 +5,12 @@ import CryptoKit
 struct AccessoryState: Codable, Equatable {
     let id: String
     let name: String
+    /// HomeKit home name, set by the bridge ONLY when more than one home is
+    /// visible (single-home setups stay un-prefixed). Consumers prepend it to
+    /// `name` for display via `displayName`. Additive/optional on the wire —
+    /// older bridges omit it and show the bare name. NEVER part of the wire id
+    /// or identity, so adding it cannot reassign existing devices/entities.
+    let home: String?
     let manufacturer: String?
     let model: String?
     let firmwareVersion: String?
@@ -20,7 +26,7 @@ struct AccessoryState: Codable, Equatable {
     let updatedAt: String
 
     enum CodingKeys: String, CodingKey {
-        case id, name, manufacturer, model
+        case id, name, home, manufacturer, model
         case firmwareVersion = "firmware_version"
         case serialNumber = "serial_number"
         case reachable
@@ -32,6 +38,14 @@ struct AccessoryState: Codable, Equatable {
         case batteryLevel = "battery_level"
         case lowBattery = "low_battery"
         case updatedAt = "updated_at"
+    }
+
+    /// Name to show in UIs: home-prefixed ("<home> <name>") when a non-empty
+    /// home is set, otherwise the bare name. App-side only (computed → never
+    /// encoded onto the wire).
+    var displayName: String {
+        if let home = home, !home.isEmpty { return "\(home) \(name)" }
+        return name
     }
 
     /// Return a copy with `target_state` and `lifecycle_state` overlaid with
@@ -51,6 +65,7 @@ struct AccessoryState: Codable, Equatable {
         return AccessoryState(
             id: self.id,
             name: self.name,
+            home: self.home,
             manufacturer: self.manufacturer,
             model: self.model,
             firmwareVersion: self.firmwareVersion,
@@ -76,6 +91,7 @@ struct AccessoryState: Codable, Equatable {
         return AccessoryState(
             id: newID,
             name: name,
+            home: home,
             manufacturer: manufacturer,
             model: model,
             firmwareVersion: firmwareVersion,
@@ -96,6 +112,7 @@ struct AccessoryState: Codable, Equatable {
     func equalsIgnoringTimestamp(_ other: AccessoryState) -> Bool {
         return id == other.id
             && name == other.name
+            && home == other.home
             && manufacturer == other.manufacturer
             && model == other.model
             && firmwareVersion == other.firmwareVersion
@@ -110,7 +127,7 @@ struct AccessoryState: Codable, Equatable {
             && lowBattery == other.lowBattery
     }
 
-    static func from(accessory: HMAccessory, info: [String: String], lastTargetChange: Date? = nil, now: Date = Date()) -> AccessoryState {
+    static func from(accessory: HMAccessory, info: [String: String], homeName: String? = nil, lastTargetChange: Date? = nil, now: Date = Date()) -> AccessoryState {
         var current: Int?
         var target: Int?
         var battery: Int?
@@ -148,6 +165,7 @@ struct AccessoryState: Codable, Equatable {
                 fallback: accessory.uniqueIdentifier
             ),
             name: accessory.name,
+            home: homeName,
             manufacturer: info["manufacturer"],
             model: prettifyModel(manufacturer: info["manufacturer"], model: info["model"]),
             firmwareVersion: info["firmware_version"],
