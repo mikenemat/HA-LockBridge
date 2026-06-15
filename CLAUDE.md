@@ -37,15 +37,25 @@ app, etc.) — it never disrupts the primary pairing.
 
 1. **Mac Catalyst, not pure macOS.** Apple removed `HomeKit.framework` from the
    plain macOS SDK in macOS 15+; it's only in `iOSSupport` now. The Catalyst
-   target triple (`arm64-apple-ios18.0-macabi`) is mandatory.
+   target triple (`arm64-apple-ios<deployment-target>-macabi`) is mandatory.
+   The deployment target itself is `project.yml`'s `deploymentTarget.iOS`
+   (currently **17.0**) — don't hard-code an iOS version here; read it from
+   `project.yml`.
 
-2. **App must be sandbox-free + use the `com.apple.developer.homekit`
-   entitlement.** That entitlement is "restricted," meaning ad-hoc signing is
-   rejected by AMFI. The app must be signed with a real provisioning profile.
-   Release builds use the paid Developer ID Application cert (12-month
-   profiles, notarized via `scripts/release.sh`). Contributors building
-   locally with a free Personal Team will see 7-day profile rotation —
-   that's expected, just rebuild.
+2. **App is sandboxed (since 0.5.0) + uses the `com.apple.developer.homekit`
+   entitlement.** The App Store requires the sandbox; HomeKit works inside it.
+   The HomeKit entitlement is "restricted," meaning ad-hoc signing is rejected
+   by AMFI — the app must be signed with a real provisioning profile.
+   **Release distribution is the Mac App Store only.** There is no
+   `scripts/release.sh` and no Developer ID / notarized path: HomeKit's
+   restricted entitlement can't ship over Developer ID (Apple's profile
+   generator silently strips the HomeKit entitlement from any Developer ID
+   profile). Cut a release by bumping `project.yml`'s `MARKETING_VERSION` +
+   `CURRENT_PROJECT_VERSION`, then in Xcode: Archive → Distribute App → App
+   Store Connect → Upload (an `ExportOptions.plist` drives the non-interactive
+   export). Contributors building locally with a free Personal Team will see
+   7-day profile rotation — that's expected, just rebuild. See
+   `macos-app/README.md` for the full release walkthrough.
 
 3. **Appliance mode: the app is a normal foreground app, NOT a hidden
    menu-bar utility** (changed in 0.6.0). It runs `.regular` with
@@ -64,6 +74,12 @@ app, etc.) — it never disrupts the primary pairing.
    policy, menu-bar-only) — the entire prior four-layer window-hider +
    `StatusBarController` apparatus was removed precisely because a hidden
    bridge can't control locks. Run it on a dedicated Mac.
+   **`SMAppService.mainApp` does not work on Mac Catalyst** — it returns
+   `.notFound`, so the app cannot register itself as a login item. Start-at-Login
+   is therefore a manual one-time step the user does in System Settings →
+   General → Login Items (the in-window "Start at Login" button just opens that
+   pane via `SMAppService.openSystemSettingsLoginItems()`). Don't try to wire up
+   programmatic login-item registration; it's a Catalyst dead end.
 
 4. **The bridge identifies itself via a UUID in Bonjour TXT records, not via
    hostname.** This is what makes Mac renames / IP changes survivable. The HA
@@ -78,8 +94,9 @@ app, etc.) — it never disrupts the primary pairing.
    for `.accessory` apps too often, and the PIN log line leaked a
    token-equivalent secret to `/tmp/ha-lockbridge.err`. The SwiftUI status
    window's Approve/Deny buttons are now the sole mechanism — pair requests
-   that arrive while the bridge is headless will simply sit pending until
-   the user is at the Mac.
+   that arrive while nobody is at the Mac simply sit pending until the user
+   acts on them. (The window is always visible now — see item 3 — so there's
+   no headless state to recover from; this is just the no-one-watching case.)
 
 6. **Bridge filters out "ghost" HomeKit accessories** (ones that never reported
    manufacturer info because they were unreachable throughout discovery)
@@ -88,8 +105,9 @@ app, etc.) — it never disrupts the primary pairing.
 
 7. **Lifecycle state derivation is on the bridge.** The bridge synthesizes
    `lifecycle_state` (one of `locked`/`unlocked`/`locking`/`unlocking`/
-   `jammed`/`unknown`) using a 15s transition window after `target_state`
-   changes. HA maps this directly to `LockEntity.is_locked` /
+   `jammed`/`unknown`) using a 90s transition window after `target_state`
+   changes (matching the write-retry budget — a HomeKit lock can take that
+   long to wake and actuate). HA maps this directly to `LockEntity.is_locked` /
    `is_locking` / `is_unlocking` / `is_jammed`. Keep the timing logic on the
    bridge — duplicating it in HA invites drift.
 
@@ -130,8 +148,11 @@ python3 -c "import json; json.load(open('manifest.json'))"
   `setAppKitActivationPolicy`, `centerNSWindow`).
 - **Don't store secrets in source.** The Apple Developer Team ID belongs in
   `macos-app/DevelopmentTeam.xcconfig` (gitignored). Bearer tokens live in
-  `~/Library/Application Support/HALockBridge/config.json`, never in the
-  repo.
+  the app's `config.json`, never in the repo. On the sandboxed App Store build
+  that's inside the container
+  (`~/Library/Containers/<bundle-id>/Data/Library/Application Support/HALockBridge/config.json`);
+  a self-built non-sandboxed copy uses
+  `~/Library/Application Support/HALockBridge/config.json`.
 - **Don't reach for `UNUserNotificationCenter`.** Already tried, doesn't
   reliably work for `.accessory` apps. See item 5 above.
 - **Don't change the bundle ID lightly.** Each new bundle ID requires a
@@ -149,6 +170,19 @@ Update *both* sides:
 3. `custom_components/ha_lockbridge/client.py` (parses
    what the bridge sends)
 4. Update both READMEs' protocol tables if endpoints change.
+
+**The `api` protocol version (the `api` field in the WS `hello` envelope,
+`/info`, and the Bonjour TXT record) bumps ONLY on a *breaking* wire change** —
+one that an old consumer can no longer parse correctly: a removed/renamed
+field, a changed field type, a changed endpoint contract, or a new *required*
+field. **Additive, backward-compatible changes never bump it** — adding a new
+optional field, a new envelope `type` that old clients can ignore, or a new
+endpoint. This matters because App Store (bridge) and HACS (integration)
+update on independent schedules, so the two halves are routinely on different
+releases; the integration keys its compatibility decisions off `api`, not the
+marketing version. Bumping `api` for an additive change would spuriously trip
+the integration's "bridge too new" repair issue. When you do bump it, update
+the integration's supported-`api` constant in lockstep.
 
 ## When you change the HA integration's `manifest.json`
 

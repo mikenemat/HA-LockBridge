@@ -8,13 +8,15 @@ on:
 
 jobs:
   ha-integration:
-    name: HA integration — syntax & schema
+    name: HA integration — syntax, schema & tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install test deps
+        run: pip install pytest
       - name: py_compile every .py
         working-directory: custom_components/ha_lockbridge
         run: |
@@ -30,11 +32,56 @@ jobs:
       - name: Validate root JSON files
         run: |
           python -c "import json; json.load(open('hacs.json'))"
-      - name: Run sanity tests
+      - name: Run tests
+        # pytest is authoritative — it's installed above, so a missing or
+        # broken test module fails CI instead of being silently skipped.
+        run: python -m pytest tests/ -v
+
+  hassfest:
+    name: hassfest (Home Assistant manifest validation)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    name: HACS validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hacs/action@main
+        with:
+          category: integration
+
+  manifest-bump:
+    name: manifest version bump guard
+    # Only meaningful on PRs: if any integration file changed, the manifest
+    # version must change too (HA only reloads on a version bump — see
+    # CLAUDE.md). Pushes to main skip this (the bump already happened on the PR).
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require a manifest version bump when integration files change
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          python -m pytest tests/ -v || python -c "
-          import sys; sys.path.insert(0, 'tests'); import test_partition as t
-          for n in dir(t):
-              if n.startswith('test_'):
-                  getattr(t, n)(); print(f'  ok {n}')
-          "
+          changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- custom_components/ha_lockbridge/)
+          if [ -z "$changed" ]; then
+            echo "No integration files changed — nothing to enforce."
+            exit 0
+          fi
+          echo "Changed integration files:"
+          echo "$changed"
+          old=$(git show "$BASE_SHA:custom_components/ha_lockbridge/manifest.json" \
+                 | python -c "import json,sys; print(json.load(sys.stdin)['version'])")
+          new=$(python -c "import json; print(json.load(open('custom_components/ha_lockbridge/manifest.json'))['version'])")
+          echo "manifest version: $old -> $new"
+          if [ "$old" = "$new" ]; then
+            echo "::error::Integration files changed but manifest.json version is still $new. Bump it (HA only reloads on a version change)."
+            exit 1
+          fi
+          echo "Version bumped — OK."

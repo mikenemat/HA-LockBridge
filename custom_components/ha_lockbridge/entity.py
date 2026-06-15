@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity
@@ -20,21 +20,58 @@ from .const import (
     SIGNAL_STATE_UPDATE,
 )
 
+# Sentinel telling enabled_accessory_ids apart: a *missing* key (pre-options-flow
+# entries, or entries created before per-device selection existed) means "expose
+# everything". An explicit empty list means "the user deselected everything" and
+# we must expose nothing. `None` from .get() can't distinguish these on its own,
+# so we probe membership explicitly below.
+
+
+def is_accessory_enabled(entry: ConfigEntry, accessory_id: str) -> bool:
+    """Whether a single accessory id should be exposed for this entry.
+
+    - Key absent from options  -> expose everything (legacy/upgrade safety).
+    - Key present, empty list   -> expose nothing.
+    - Key present, non-empty    -> expose only listed ids.
+    """
+    if CONF_ENABLED_IDS not in entry.options:
+        return True
+    return accessory_id in set(entry.options.get(CONF_ENABLED_IDS) or [])
+
 
 def enabled_accessories(
     client: LockBridgeClient, entry: ConfigEntry
 ) -> list[dict[str, Any]]:
     """Return only the accessories the user chose to expose.
 
-    If the entry has no `enabled_accessory_ids` in options (pre-options-flow
-    entries), fall back to returning everything — so upgrading a working
-    install doesn't silently drop entities.
+    Distinguishes *unset* from *empty*:
+    - If the entry has no `enabled_accessory_ids` key in options (pre-options-flow
+      entries), return everything — so upgrading a working install doesn't
+      silently drop entities.
+    - If the key is present but an empty list, the user deliberately deselected
+      everything: return nothing (the old `if not enabled` collapsed these two
+      and exposed everything when the user wanted nothing).
     """
-    enabled = entry.options.get(CONF_ENABLED_IDS)
-    if not enabled:
+    if CONF_ENABLED_IDS not in entry.options:
         return list(client.states.values())
-    enabled_set = set(enabled)
+    enabled_set = set(entry.options.get(CONF_ENABLED_IDS) or [])
     return [a for a in client.states.values() if a.get("id") in enabled_set]
+
+
+def register_dynamic_adder(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    signal_template: str,
+    handler: Callable[[dict[str, Any]], None],
+    connect: Callable[..., Callable[[], None]] = async_dispatcher_connect,
+) -> None:
+    """Subscribe `handler` to a per-entry dispatcher signal and ensure the
+    subscription is torn down on entry unload.
+
+    `connect` is injectable for testing; defaults to HA's dispatcher connect.
+    """
+    signal = signal_template.format(entry_id=entry.entry_id)
+    entry.async_on_unload(connect(hass, signal, handler))
 
 
 class LockBridgeBaseEntity(Entity):
@@ -53,6 +90,9 @@ class LockBridgeBaseEntity(Entity):
         self._entry = entry
         self._accessory_id: str = accessory["id"]
         self._state: dict[str, Any] = accessory
+        # Set when the bridge tells us this accessory was removed. We then report
+        # unavailable instead of freezing the last-known state as "available".
+        self._removed: bool = False
 
     @property
     def accessory(self) -> dict[str, Any]:
@@ -76,6 +116,8 @@ class LockBridgeBaseEntity(Entity):
 
     @property
     def available(self) -> bool:
+        if self._removed:
+            return False
         return bool(self._client.connected) and bool(self.accessory.get("reachable"))
 
     async def async_added_to_hass(self) -> None:
@@ -101,6 +143,9 @@ class LockBridgeBaseEntity(Entity):
     def _on_state(self, accessory: dict[str, Any]) -> None:
         if accessory.get("id") != self._accessory_id:
             return
+        # A state update means the accessory is back / still present — clear the
+        # removed flag so it can recover from a transient removal.
+        self._removed = False
         self._state = accessory
         self.async_write_ha_state()
 
@@ -108,6 +153,9 @@ class LockBridgeBaseEntity(Entity):
     def _on_removed(self, accessory_id: str) -> None:
         if accessory_id != self._accessory_id:
             return
+        # Mark unavailable rather than freezing the last-known state as
+        # "available" forever.
+        self._removed = True
         self.async_write_ha_state()
 
     @callback

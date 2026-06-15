@@ -15,11 +15,15 @@ final class StatusViewModel: ObservableObject {
         case waiting        // waiting for the first HA to pair
         case debug          // stats + controls panel (the main screen once paired)
         case resetConfirm   // confirmation overlay for Reset Pairing
+        case error(String)  // bridge failed to start (corrupt config, port in use, …)
     }
 
     struct PendingPair: Equatable {
         let requestID: String
         let clientName: String
+        /// Remote IP that initiated the pair request — shown in the banner so
+        /// the user can sanity-check who's asking before approving.
+        let requesterIP: String
     }
 
     @Published var display: Display = .initializing
@@ -38,15 +42,20 @@ final class StatusViewModel: ObservableObject {
     /// Inline pair-approval prompt. Non-nil while a request is pending;
     /// rendered as a banner above the main content in either screen.
     @Published var pendingRequest: PendingPair?
-    /// Start-at-Login control state, surfaced as a toggle in the panel.
-    @Published var loginItemEnabled: Bool = false
-    @Published var loginItemAvailable: Bool = true
+    /// True when the controller is authorized but HomeKit reports zero homes
+    /// for a sustained window — likely iCloud HomeKit session rot. Rendered as
+    /// a warning banner so this otherwise-invisible appliance-rot mode is
+    /// surfaced at the Mac.
+    @Published var homesVisibilityWarning: Bool = false
+    // Start-at-Login has no in-app toggle: SMAppService can't register a
+    // Catalyst app as a login item (see LoginItemManager), so the panel just
+    // offers a button into System Settings → Login Items. No state to track.
 
     // Callbacks wired by AppDelegate.
     var onApprove: ((String) -> Void)?
     var onDeny: ((String) -> Void)?
     var onResetConfirmed: (() -> Void)?
-    var onToggleLoginItem: (() -> Void)?
+    var onOpenLoginItemsSettings: (() -> Void)?
     var onQuit: (() -> Void)?
 
     // MARK: - Transitions
@@ -54,6 +63,7 @@ final class StatusViewModel: ObservableObject {
     func showWaiting() { display = .waiting }
     func showDebug() { display = .debug }
     func showResetConfirm() { display = .resetConfirm }
+    func showError(_ message: String) { display = .error(message) }
 
     /// Settle into the correct main screen based on pairing state — stats
     /// panel if paired, waiting screen if not. Called on launch, after a
@@ -68,12 +78,21 @@ final class StatusViewModel: ObservableObject {
 
     // MARK: - Pair request banner
 
-    func showPendingRequest(requestID: String, clientName: String) {
-        pendingRequest = PendingPair(requestID: requestID, clientName: clientName)
+    func showPendingRequest(requestID: String, clientName: String, requesterIP: String) {
+        pendingRequest = PendingPair(requestID: requestID, clientName: clientName, requesterIP: requesterIP)
     }
 
     func clearPendingRequest() {
         pendingRequest = nil
+    }
+
+    /// Clear the banner only if it's still showing `requestID`. Prevents an
+    /// unrelated request's expiry/finalization from clearing a banner that's
+    /// since moved on to a different request.
+    func clearPendingRequest(ifMatching requestID: String) {
+        if pendingRequest?.requestID == requestID {
+            pendingRequest = nil
+        }
     }
 
     // MARK: - Actions called from SwiftUI buttons
@@ -86,7 +105,7 @@ final class StatusViewModel: ObservableObject {
         if let r = pendingRequest { onDeny?(r.requestID) }
     }
 
-    func toggleLoginItemTapped() { onToggleLoginItem?() }
+    func openLoginItemsSettingsTapped() { onOpenLoginItemsSettings?() }
 
     func quitTapped() { onQuit?() }
 

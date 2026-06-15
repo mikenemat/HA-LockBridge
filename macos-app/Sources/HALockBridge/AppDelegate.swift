@@ -46,6 +46,10 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     /// (an NSRunningApplication, via the Obj-C bridge). We hand focus back to
     /// it once the write settles. nil when we owe no restore.
     private var focusRestoreTarget: NSObject?
+    /// The pending +0.2s focus re-grab. Stored so a sub-200ms settle can
+    /// cancel it in `restoreFocusTarget()` — otherwise the late re-grab fires
+    /// AFTER we've already restored focus, permanently re-stealing it.
+    private var pendingFocusReGrab: DispatchWorkItem?
 
     func application(
         _ application: UIApplication,
@@ -78,15 +82,31 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             // Re-assert shortly after: macOS 14+ cooperative activation can
             // silently drop a self-activation that arrives without an
             // activation token, so a single attempt occasionally doesn't
-            // take. A second pass a beat later makes it reliable.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            // take. A second pass a beat later makes it reliable. Stored as a
+            // cancellable work item so a sub-200ms settle can cancel it in
+            // restoreFocusTarget() — otherwise this late re-grab fires after
+            // we've already handed focus back and permanently re-steals it.
+            self.pendingFocusReGrab?.cancel()
+            let reGrab = DispatchWorkItem { [weak self] in
+                self?.pendingFocusReGrab = nil
                 self?.grabFocus()
+                // Verify shortly after the re-grab — cooperative activation is
+                // async, so check on the next runloop hop rather than inline.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                    self?.verifyFocusGrab()
+                }
             }
+            self.pendingFocusReGrab = reGrab
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: reGrab)
         }
         // When the last in-flight write settles, hand focus back to whatever
         // app we stole it from — return things to how they were.
         m.onAllWritesSettled = { [weak self] in
             self?.restoreFocusTarget()
+        }
+        // Surface the authorized-but-homeless appliance-rot mode in the UI.
+        m.onHomesVisibilityChanged = { [weak vm] empty in
+            Task { @MainActor in vm?.homesVisibilityWarning = empty }
         }
         let cliCommand = Self.parseCommand(from: CommandLine.arguments)
         if let cmd = cliCommand {
@@ -119,10 +139,17 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             let store = TokenStore(config: config, path: path)
             let pairing = PairingManager(store: store, logger: log)
 
+            // Cap the rows we push into the @Published lists. History stays
+            // unbounded in the logs; this bounds the per-event copy + SwiftUI
+            // diff that runs on the main (HomeKit) thread so a months-uptime
+            // bridge doesn't pay O(history) on every single event. The Stats
+            // panel's scroll regions only show a finite window anyway.
+            let maxUIRows = 200
+
             let interactionLog = InteractionLog()
             interactionLog.onChange = { [weak self, weak viewModel] in
                 guard let log = self?.interactionLog else { return }
-                let snapshot = log.all()
+                let snapshot = log.recent(maxUIRows)
                 Task { @MainActor in
                     viewModel?.recentInteractions = snapshot
                 }
@@ -132,7 +159,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             let lockEventLog = LockEventLog()
             lockEventLog.onChange = { [weak self, weak viewModel] in
                 guard let log = self?.lockEventLog else { return }
-                let snapshot = log.all()
+                let snapshot = log.recent(maxUIRows)
                 Task { @MainActor in
                     viewModel?.recentLockEvents = snapshot
                 }
@@ -142,16 +169,19 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
 
             // Pair request → show the inline banner and grab focus so the
             // user sees it (no Dock-bounce needed now that we're frontmost).
-            pairing.onRequestStarted = { [weak self, weak viewModel] reqID, name in
+            pairing.onRequestStarted = { [weak self, weak viewModel] reqID, name, requesterIP in
                 Task { @MainActor in
-                    viewModel?.showPendingRequest(requestID: reqID, clientName: name)
+                    viewModel?.showPendingRequest(requestID: reqID, clientName: name, requesterIP: requesterIP)
                     self?.activateApp()
                     self?.bringWindowToFront()
                 }
             }
-            pairing.onRequestFinalized = { [weak self, weak viewModel] _, _ in
+            pairing.onRequestFinalized = { [weak self, weak viewModel] reqID, _ in
                 Task { @MainActor in
-                    viewModel?.clearPendingRequest()
+                    // Only clear the banner if it's still showing THIS request.
+                    // An old request's expiry must not wipe a banner that has
+                    // since advanced to an unrelated pending request.
+                    viewModel?.clearPendingRequest(ifMatching: reqID)
                     if let count = self?.store?.snapshotConfig().paired_clients.count {
                         viewModel?.pairedCount = count
                     }
@@ -169,20 +199,20 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             viewModel.onResetConfirmed = { [weak self] in
                 self?.performReset()
             }
-            viewModel.onToggleLoginItem = { [weak self] in
-                self?.toggleLoginItem()
+            viewModel.onOpenLoginItemsSettings = {
+                LoginItemManager.openSettings()
             }
             viewModel.onQuit = {
                 exit(0)
             }
 
-            // Seed counts + login-item state, then settle into the right
-            // main screen (paired → stats panel, else → waiting).
+            // Seed counts + login-item state. Deliberately DON'T settle into
+            // the main screen yet — the "advertising on your network" screen
+            // must not show before the server has actually bound its port.
+            // refreshMainView() is called below, after `try s.start()`
+            // succeeds, so a bind failure surfaces the error screen instead.
             viewModel.pairedCount = config.paired_clients.count
             viewModel.accessoryCount = 0
-            viewModel.loginItemEnabled = LoginItemManager.isEnabled
-            viewModel.loginItemAvailable = LoginItemManager.isAvailable
-            Task { @MainActor in viewModel.refreshMainView() }
 
             // Keep the panel's live accessory list + count in sync.
             _ = monitor.addObserver(
@@ -210,6 +240,12 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             }
             try s.start()
 
+            // Server is bound and listening — NOW settle into the main screen
+            // (paired → stats panel, else → waiting). Doing this only after a
+            // successful start() means a bind failure can't show the
+            // "advertising on your network" screen with a dead server behind it.
+            Task { @MainActor in viewModel.refreshMainView() }
+
             let bj = BonjourService(port: store.port, instanceID: store.instanceID, logger: log)
             bj.start()
 
@@ -219,25 +255,11 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             self.bonjour = bj
         } catch {
             FileHandle.standardError.write(Data("[lockbridge-server] FAILED to start: \(error)\n".utf8))
-        }
-    }
-
-    // MARK: - Login Item
-
-    private func toggleLoginItem() {
-        do {
-            try LoginItemManager.toggle()
-        } catch {
-            FileHandle.standardError.write(
-                Data("[ha-lockbridge] Login Item toggle failed: \(error.localizedDescription)\n".utf8)
-            )
-        }
-        // Re-query authoritative state and reflect it in the toggle.
-        let enabled = LoginItemManager.isEnabled
-        let available = LoginItemManager.isAvailable
-        Task { @MainActor in
-            self.statusVM?.loginItemEnabled = enabled
-            self.statusVM?.loginItemAvailable = available
+            // Surface the failure in the UI instead of sitting on the
+            // initializing/advertising screen with no working server. Common
+            // causes: port 8765 already in use, or a corrupt config.json.
+            let message = (error as NSError).localizedDescription
+            Task { @MainActor in viewModel.showError(message) }
         }
     }
 
@@ -257,6 +279,21 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             self.statusVM?.clearPendingRequest()
             self.statusVM?.refreshMainView()
         }
+    }
+
+    // MARK: - Menu hardening (Catalyst)
+
+    /// Strip the menu commands that would background or close the appliance:
+    /// Close (Cmd-W), Minimize/Zoom (Cmd-M), and Hide (Cmd-H). Either closing
+    /// or minimizing/hiding drops the app out of `.active`, which stalls
+    /// HomeKit writes (see the appliance rationale at the top of this file).
+    /// Quit (Cmd-Q) is deliberately left intact — it's the supported way to
+    /// stop the bridge, alongside the in-window Quit button.
+    override func buildMenu(with builder: UIMenuBuilder) {
+        super.buildMenu(with: builder)
+        builder.remove(menu: .close)
+        builder.remove(menu: .minimizeAndZoom)
+        builder.remove(menu: .hide)
     }
 
     // MARK: - Scene config
@@ -279,11 +316,30 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     /// bring ourselves to the front.
     @MainActor
     func onWindowReady() {
+        checkAppKitBridgeSelectors()
         setAppKitActivationPolicy(.regular)
         centerNSWindow()
         disableWindowDismissal()
         activateApp()
         bringWindowToFront()
+    }
+
+    /// One-time startup probe: log a warning if the AppKit runtime-bridge
+    /// selectors we depend on can't be resolved on this OS. Without this,
+    /// every runtime-bridge call (activate, order-front, styleMask, etc.)
+    /// fails silently — and the user only discovers the appliance can't grab
+    /// focus when a 3am lock command stalls. Surfacing it at launch turns a
+    /// silent degradation into a visible log line.
+    private func checkAppKitBridgeSelectors() {
+        guard let nsApp = nsApp() else {
+            FileHandle.standardError.write(Data("[lockbridge-server] AppKit bridge: NSApplication unavailable — focus-steal and window hardening will NOT work\n".utf8))
+            return
+        }
+        let appSelectors = ["setActivationPolicy:", "activate", "activateIgnoringOtherApps:", "isActive"]
+        let missing = appSelectors.filter { !nsApp.responds(to: NSSelectorFromString($0)) }
+        if !missing.isEmpty {
+            FileHandle.standardError.write(Data("[lockbridge-server] AppKit bridge: NSApplication missing selectors \(missing.joined(separator: ", ")) — focus-steal may be unreliable\n".utf8))
+        }
     }
 
     // MARK: - AppKit bridge (Catalyst exposes no AppKit directly)
@@ -336,6 +392,41 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         bringWindowToFront()
     }
 
+    /// Whether NSApplication currently reports `.active`. nil if the selector
+    /// can't be resolved (which itself is a signal the AppKit bridge is
+    /// broken on this OS). Read via the KVC bridge.
+    private func isAppActive() -> Bool? {
+        guard let nsApp = nsApp() else { return nil }
+        let sel = NSSelectorFromString("isActive")
+        guard nsApp.responds(to: sel) else { return nil }
+        return (nsApp.value(forKey: "active") as? NSNumber)?.boolValue
+    }
+
+    /// After a focus-grab, verify we actually became `.active`. If not, the
+    /// next HomeKit write may stall (the whole reason we grab focus). Record a
+    /// diagnostic into the LockEventLog so the failure is visible on the Stats
+    /// page rather than silently degrading. Runs a beat after the re-grab so
+    /// cooperative activation has settled.
+    private func verifyFocusGrab() {
+        switch isAppActive() {
+        case .some(true):
+            return  // grabbed successfully
+        case .some(false):
+            lockEventLog?.record(.init(
+                id: UUID(),
+                accessoryName: "(app)",
+                accessoryID: "",
+                timestamp: Date(),
+                kind: .focusGrabFailed
+            ))
+            FileHandle.standardError.write(Data("[lockbridge-server] focus grab verification: app is NOT active after grab — HomeKit write may stall\n".utf8))
+        case .none:
+            // Selector didn't resolve — logged once at startup already; don't
+            // spam a LockEventLog entry per write.
+            break
+        }
+    }
+
     /// The current frontmost application (NSRunningApplication) via
     /// NSWorkspace. nil if unavailable.
     private func frontmostApp() -> NSObject? {
@@ -362,6 +453,11 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     /// Hand focus back to the app we stole it from, if any. Called when the
     /// last in-flight write settles (lock confirmed / reverted).
     private func restoreFocusTarget() {
+        // Cancel the +0.2s re-grab — if this settle landed within 200ms of the
+        // write request, that timer hasn't fired yet and would re-steal focus
+        // right after we hand it back.
+        pendingFocusReGrab?.cancel()
+        pendingFocusReGrab = nil
         guard let app = focusRestoreTarget else { return }
         focusRestoreTarget = nil
         let sel = NSSelectorFromString("activateWithOptions:")
@@ -406,11 +502,17 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         }
     }
 
-    /// Hide the close + miniaturize window buttons. Closing the window tears
-    /// down the backing NSWindow (which Catalyst won't rebuild) and minimizing
-    /// drops the app out of `.active` — both break HomeKit writes. The only
-    /// way to stop the bridge is the in-panel Quit (or Cmd-Q). Zoom is left
-    /// alone (harmless).
+    /// Hide the close + miniaturize window buttons AND clear the matching
+    /// styleMask bits. Hiding the buttons alone left two ways to still kill
+    /// the appliance: Cmd-W / Cmd-M (the menu commands), and double-clicking
+    /// the titlebar (which minimizes when the miniaturizable bit is set).
+    /// Closing the window tears down the backing NSWindow (which Catalyst
+    /// won't rebuild) and minimizing drops the app out of `.active` — both
+    /// break HomeKit writes. Clearing the styleMask bits makes Cmd-W/Cmd-M
+    /// no-ops at the AppKit level and stops the titlebar-double-click minimize
+    /// (`buildMenu(with:)` strips the menu items too). The only way to stop
+    /// the bridge is the in-panel Quit (or Cmd-Q). Zoom is left alone
+    /// (harmless).
     private func disableWindowDismissal() {
         guard let nsApp = nsApp() else { return }
         guard let windows = nsApp.value(forKey: "windows") as? [NSObject] else { return }
@@ -425,6 +527,23 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                     btn.setValue(true, forKey: "hidden")
                 }
             }
+            clearWindowStyleMaskBits(w)
+        }
+    }
+
+    /// Clear the `closable` (1<<1) and `miniaturizable` (1<<2) bits from an
+    /// NSWindow's styleMask via the KVC bridge. With these cleared, Cmd-W and
+    /// Cmd-M (and the titlebar double-click minimize) become no-ops even if
+    /// the menu items somehow remain. `styleMask` is an NSUInteger property
+    /// exposed to KVC, so read-modify-write through `value(forKey:)` /
+    /// `setValue(_:forKey:)`.
+    private func clearWindowStyleMaskBits(_ window: NSObject) {
+        let closableBit: UInt = 1 << 1
+        let miniaturizableBit: UInt = 1 << 2
+        guard let current = (window.value(forKey: "styleMask") as? NSNumber)?.uintValue else { return }
+        let cleared = current & ~(closableBit | miniaturizableBit)
+        if cleared != current {
+            window.setValue(NSNumber(value: cleared), forKey: "styleMask")
         }
     }
 

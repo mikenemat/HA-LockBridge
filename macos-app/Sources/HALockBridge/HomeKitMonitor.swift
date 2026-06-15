@@ -73,6 +73,8 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
 
     typealias StateObserver = (AccessoryState) -> Void
     typealias RemovalObserver = (UUID) -> Void
+    /// (wireID, target "secured"|"unsecured", reason "budget_exhausted"|"error", accessoryName)
+    typealias WriteRevertedObserver = (String, String, String, String) -> Void
 
     final class ObserverToken {
         fileprivate let id = UUID()
@@ -85,7 +87,7 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     private var infoCache: [UUID: [String: String]] = [:]
     private var stateStore: [UUID: AccessoryState] = [:]
     private var lastTargetChange: [UUID: Date] = [:]
-    private var observers: [(token: ObserverToken, onState: StateObserver, onRemoved: RemovalObserver)] = []
+    private var observers: [(token: ObserverToken, onState: StateObserver, onRemoved: RemovalObserver, onWriteReverted: WriteRevertedObserver?)] = []
     /// Home name per accessory, populated during enumeration. Needed by the
     /// AccessoryIdentityCache so it can match by (homeName, accessoryName)
     /// after a re-sign rotates HMAccessory.uniqueIdentifier.
@@ -119,12 +121,41 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     /// paths no-op.
     var onAllWritesSettled: (() -> Void)?
 
+    /// Fired on the main thread with `true` when the controller is authorized
+    /// but HomeKit reports zero homes for a sustained window (likely iCloud
+    /// HomeKit session rot), and `false` once homes appear. AppDelegate wires
+    /// this to a status-window warning banner. Optional so CLI/test paths
+    /// no-op.
+    var onHomesVisibilityChanged: ((Bool) -> Void)?
+
+    /// Tracks the last warning state pushed to `onHomesVisibilityChanged` so
+    /// we only fire on transitions, not on every check.
+    private var lastHomesEmptyWarning = false
+    /// How long the controller can be authorized-but-homeless before we warn.
+    /// Long enough to ride out first-launch iCloud sync lag (which can take a
+    /// few minutes) without crying wolf.
+    private static let emptyHomesWarnDelay: TimeInterval = 120
+
     /// Fire `onAllWritesSettled` when no background writes remain pending.
     /// Called at every terminal write resolution so focus can be returned to
     /// the app we stole it from — but only once the *last* concurrent write
     /// finishes, so overlapping commands don't bounce focus around.
     private func notifyIfAllWritesSettled() {
         if pendingWrites.isEmpty { onAllWritesSettled?() }
+    }
+
+    /// Fan a `write_reverted` notification out to observers (the BridgeServer
+    /// turns it into a WS envelope). Emitted whenever an optimistic write is
+    /// rolled back — budget exhausted or a non-retryable HomeKit error. The
+    /// UI revert stays silent; this is purely for HA-side automation. The
+    /// wire ID is resolved from the reverted state (falls back to the HM UUID
+    /// string only if no stable wire ID was ever pinned).
+    private func emitWriteReverted(hmID: UUID, target: Int, reason: String, accessoryName: String) {
+        let wireID = stateStore[hmID]?.id ?? hmID.uuidString
+        let targetStr = target == 1 ? "secured" : "unsecured"
+        for o in observers {
+            o.onWriteReverted?(wireID, targetStr, reason, accessoryName)
+        }
     }
     /// Accessories whose SerialNumber characteristic exists but failed all
     /// retry attempts. Treated as "no serial available, ever" — the cache
@@ -274,6 +305,16 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             .sorted { $0.name.lowercased() < $1.name.lowercased() }
     }
 
+    /// Whether HomeKit currently reports any homes to this controller. False
+    /// is the signature of the most likely real-world appliance-rot mode:
+    /// the app is authorized but its iCloud HomeKit session silently lost
+    /// sync, so every home (and every lock) vanished. Surfaced via /health's
+    /// `homes_visible` and the status-window warning. Must be called from the
+    /// main thread (HomeKit's delegate queue).
+    func homesVisible() -> Bool {
+        return !homeManager.homes.isEmpty
+    }
+
     /// Returns a single accessory state by UUID, or nil if the accessory is
     /// unknown or a ghost. Must be called from main thread.
     func state(forID id: UUID) -> AccessoryState? {
@@ -287,11 +328,17 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         return s
     }
 
-    /// Registers a pair of callbacks. Returns a token used for removal.
-    /// Both callbacks are invoked on the main thread.
-    func addObserver(onState: @escaping StateObserver, onRemoved: @escaping RemovalObserver) -> ObserverToken {
+    /// Registers a set of callbacks. Returns a token used for removal.
+    /// All callbacks are invoked on the main thread. `onWriteReverted` is
+    /// optional — only the BridgeServer (which fans it out over WS) supplies
+    /// one; the status-window observer doesn't need it.
+    func addObserver(
+        onState: @escaping StateObserver,
+        onRemoved: @escaping RemovalObserver,
+        onWriteReverted: WriteRevertedObserver? = nil
+    ) -> ObserverToken {
         let token = ObserverToken()
-        observers.append((token, onState, onRemoved))
+        observers.append((token, onState, onRemoved, onWriteReverted))
         return token
     }
 
@@ -342,16 +389,28 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         // has changed their mind (e.g. tapped Unlock while a previous Lock
         // command was still retrying); the old retry loop becomes a no-op
         // on its next callback by checking `completed`.
+        //
+        // Carry the superseded write's `priorState` forward (below). At this
+        // point `stateStore[hmID]` already holds the superseded write's
+        // *optimistic* (transition) state, so using it as this write's
+        // revert target would republish a phantom frozen "locking"/"unlocking"
+        // state on failure. The real last-known-good state is the superseded
+        // write's own priorState — thread it through so a chain of superseded
+        // writes still reverts to the genuine pre-command state.
+        var carriedPriorState: AccessoryState?
         if let existing = pendingWrites[hmID] {
             log("Lock \(accessory.name): superseding prior pending write (target=\(existing.target)) with new target=\(target)")
             existing.completed = true
+            carriedPriorState = existing.priorState
             pendingWrites.removeValue(forKey: hmID)
         }
 
-        // Capture the pre-optimistic-update state for potential revert. If
-        // there's no prior state in the store, fall back to nil — revert
-        // logic handles that case by recomputing from HMCharacteristic.
-        let priorState = stateStore[hmID]
+        // Capture the pre-optimistic-update state for potential revert. Prefer
+        // the carried-forward prior from a superseded write (the genuine
+        // last-known-good); otherwise use the current published state. If
+        // neither exists, fall back to nil — revert logic handles that by
+        // recomputing from HMCharacteristic.
+        let priorState = carriedPriorState ?? stateStore[hmID]
 
         // Mark target change so deriveLifecycle returns "locking" /
         // "unlocking" for the entire 30-second retry window.
@@ -434,7 +493,10 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
                 let isNotReachable = nsError.domain == HMErrorDomain && nsError.code == 82
                 if !isNotReachable {
                     self.log("Lock \(accessory.name): background write failed (attempt \(thisAttempt)) with non-retryable error: \(error.localizedDescription)")
-                    self.revertPending(hmID: hmID, accessory: accessory, pending: pending)
+                    // Non-82 failures previously left zero trace; record one in
+                    // the LockEventLog so the Stats page shows the failure.
+                    self.recordWriteFailed(pending: pending, accessory: accessory, detail: error.localizedDescription)
+                    self.revertPending(hmID: hmID, accessory: accessory, pending: pending, reason: "error")
                     return
                 }
                 if Date() >= pending.deadline {
@@ -451,11 +513,21 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
                 // advance the attempt counter on the open event.
                 self.recordOrAdvanceWriteRetry(pending: pending, accessory: accessory)
 
-                // The fire closure is idempotent — only the first caller
-                // (timer OR reachability waiter) actually triggers the
-                // next attempt. The other is a no-op.
+                // The fire closure is idempotent AND generation-stamped to
+                // THIS attempt. Two waiters of the same generation (the backoff
+                // timer and a reachability-recovery callback) can both fire;
+                // `pending.triggered` lets only the first win. But that flag is
+                // reset to false at the START of every attempt — so a stale
+                // waiter left over from a *previous* generation could see
+                // triggered==false again and fire a duplicate. Capturing
+                // `thisAttempt` and bailing when `pending.attempt` has already
+                // advanced closes that double-fire window (deterministic when
+                // stacked waiters drain after a reachability flip).
                 let fire: () -> Void = { [weak self] in
-                    guard let self = self, !pending.completed, !pending.triggered else { return }
+                    guard let self = self,
+                          !pending.completed,
+                          !pending.triggered,
+                          pending.attempt == thisAttempt else { return }
                     pending.triggered = true
                     self.attemptBackgroundWrite(targetChar: targetChar, accessory: accessory, hmID: hmID, pending: pending)
                 }
@@ -522,6 +594,21 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         }
     }
 
+    /// Record a `.writeFailed` event for a non-retryable (non-82) HomeKit
+    /// write error. These used to leave zero trace anywhere. Distinct from the
+    /// `.writeRetry`/`.reverted` path, which only covers the 82-retry budget.
+    private func recordWriteFailed(pending: PendingWrite, accessory: HMAccessory, detail: String) {
+        guard let log = lockEventLog else { return }
+        let actionLabel = pending.target == 1 ? "lock" : "unlock"
+        log.record(.init(
+            id: UUID(),
+            accessoryName: accessory.name,
+            accessoryID: accessory.uniqueIdentifier.uuidString,
+            timestamp: Date(),
+            kind: .writeFailed(targetAction: actionLabel, detail: detail)
+        ))
+    }
+
     /// Close the open writeRetry event for a terminating background
     /// write. No-op if no event was opened (single-attempt success).
     private func closeWriteRetryEvent(pending: PendingWrite, outcome: LockEventLog.WriteOutcome) {
@@ -553,7 +640,11 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     ///   back to the last-known real state. Silent — no error toast.
     /// - If no priorState was captured (first-ever command on this
     ///   accessory), fall back to recomputing from HMCharacteristic.
-    private func revertPending(hmID: UUID, accessory: HMAccessory, pending: PendingWrite) {
+    /// `reason` distinguishes budget-exhaustion ("budget_exhausted") from a
+    /// non-retryable HomeKit error ("error") for the `write_reverted` wire
+    /// event. Defaults to budget exhaustion since most reverts come from the
+    /// retry-budget path (deadline / safety timer).
+    private func revertPending(hmID: UUID, accessory: HMAccessory, pending: PendingWrite, reason: String = "budget_exhausted") {
         guard !pending.completed else { return }
         pending.completed = true
         pendingWrites.removeValue(forKey: hmID)
@@ -573,6 +664,12 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         }
 
         closeWriteRetryEvent(pending: pending, outcome: .reverted)
+
+        // Put the revert on the wire so HA-side automations can react to a
+        // failed lock/unlock (the #1 review finding). The on-screen UI revert
+        // stays silent; this is the automatable signal. Emitted only on a
+        // genuine revert — not when the intent was satisfied externally above.
+        emitWriteReverted(hmID: hmID, target: pending.target, reason: reason, accessoryName: accessory.name)
 
         guard let prior = pending.priorState else {
             recomputeAndPublish(for: accessory, reason: "write-giveup-no-prior")
@@ -632,7 +729,36 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         }
         if manager.homes.isEmpty {
             log("No homes returned. If this Mac is signed into iCloud with HomeKit sync, give it a few minutes — sync can lag on first run.")
+            // Schedule a delayed re-check — if still authorized-but-homeless
+            // after the grace window, surface a status-window warning.
+            scheduleEmptyHomesCheck()
+        } else {
+            // Homes are back (or were never gone) — clear any standing warning.
+            updateHomesVisibilityWarning(empty: false)
         }
+    }
+
+    /// After the grace window, if the controller is authorized but still has
+    /// zero homes, raise the status-window warning. Re-armed on every empty
+    /// `homeManagerDidUpdateHomes` so transient first-launch sync lag clears
+    /// itself once homes arrive.
+    private func scheduleEmptyHomesCheck() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.emptyHomesWarnDelay) { [weak self] in
+            guard let self = self else { return }
+            let authorized = self.homeManager.authorizationStatus.contains(.authorized)
+            self.updateHomesVisibilityWarning(empty: authorized && self.homeManager.homes.isEmpty)
+        }
+    }
+
+    /// Fire `onHomesVisibilityChanged` only on a transition so the banner
+    /// isn't churned on every check.
+    private func updateHomesVisibilityWarning(empty: Bool) {
+        guard empty != lastHomesEmptyWarning else { return }
+        lastHomesEmptyWarning = empty
+        if empty {
+            log("WARNING: authorized but no HomeKit homes visible after \(Int(Self.emptyHomesWarnDelay))s — iCloud HomeKit session may have lost sync.")
+        }
+        onHomesVisibilityChanged?(empty)
     }
 
     func homeManager(_ manager: HMHomeManager, didAdd home: HMHome) {
@@ -670,6 +796,13 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         // rare case where stateStore never got populated (e.g. ghost).
         let removedWireID = stateStore[id].flatMap { UUID(uuidString: $0.id) } ?? id
         wireIDToHMUUID.removeValue(forKey: removedWireID)
+        // Detach our delegate so HomeKit stops delivering characteristic /
+        // reachability callbacks for this (now-forgotten) accessory — those
+        // would otherwise drive recomputeAndPublish and resurrect a phantom
+        // entity. Belt-and-braces with the zombie guard in recomputeAndPublish.
+        if let removed = trackedAccessories[id], removed.delegate === self {
+            removed.delegate = nil
+        }
         trackedAccessories.removeValue(forKey: id)
         stateStore.removeValue(forKey: id)
         infoCache.removeValue(forKey: id)
@@ -1027,6 +1160,18 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
 
     private func recomputeAndPublish(for accessory: HMAccessory, reason: String) {
         let id = accessory.uniqueIdentifier
+        // Zombie guard: a late-arriving in-flight completion (background-write
+        // callback, serial read, subscribe callback) can call this for an
+        // accessory that `forgetAccessory` already removed — which would
+        // resurrect it as a phantom, uncontrollable HA entity (it's no longer
+        // in trackedAccessories, so commands would fail). Bail unless the
+        // accessory is still tracked. The legitimate initial-publish paths
+        // (considerAccessory / subscribeAndRead) always run AFTER the
+        // accessory is inserted into trackedAccessories, so they pass.
+        guard trackedAccessories[id] != nil else {
+            log("Ignoring recomputeAndPublish (\(reason)) for untracked accessory \(accessory.name) [\(id.uuidString)] — already removed")
+            return
+        }
         // Start from the cached info (currently just serial_number from the
         // characteristic-read path) and overlay the live HMAccessory
         // properties for manufacturer / model / firmwareVersion. These were
@@ -1097,10 +1242,16 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             // it stable).
             let serialGivenUp = serialReadExhausted.contains(id)
             if hasSerialNow || !hasSerialChar || serialGivenUp {
+                // When a serial is in hand, `computed.id` is the content-
+                // addressed serial-hash — pass it as `serialHash` so the cache
+                // can verify (and refuse) a same-name migration that would
+                // otherwise swap this lock's wire ID onto a different physical
+                // lock. Nil when there's no serial (fallback UUID, unverifiable).
                 pinnedID = cache.wireID(
                     forHMUUID: id.uuidString,
                     accessoryName: accessory.name,
                     homeName: homeNameForAccessory[id],
+                    serialHash: hasSerialNow ? computed.id : nil,
                     computeIfMissing: { computed.id }
                 )
             } else if let existing = cache.peekWireID(
@@ -1145,6 +1296,24 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
 
         let prior = stateStore[id]
         stateStore[id] = newState
+
+        // Wire-ID change → emit `removed` for the OLD id before publishing the
+        // new one. This is the root-cause fix for the v0.5.3 duplicate-lock
+        // bug: a newly-added lock is first published under a fallback wire id
+        // (serial read still in flight), then under its stable serial-hash id.
+        // Without a `removed` for the fallback, HA's `client.states`
+        // accumulates BOTH until a reconnect. Only fire when the prior state
+        // was healthy (already published to HA) so we don't emit spurious
+        // removals for ghosts that never reached the API surface. Also drop
+        // the stale reverse-map entry so a late inbound command on the old
+        // wire id can't mis-route.
+        if let prior = prior, prior.id != newState.id, isHealthy(prior) {
+            log("Lock \(accessory.name): wire id changed \(prior.id) → \(newState.id); emitting removed for the old id")
+            if let oldWireUUID = UUID(uuidString: prior.id) {
+                wireIDToHMUUID.removeValue(forKey: oldWireUUID)
+                for o in observers { o.onRemoved(oldWireUUID) }
+            }
+        }
 
         // Refresh the reverse map every publish. With the identity cache in
         // place the wire ID rarely changes after first sight, but the map

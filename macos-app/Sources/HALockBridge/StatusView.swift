@@ -15,6 +15,11 @@ struct StatusView: View {
                 pairBanner(pending)
             }
 
+            // iCloud HomeKit session-rot warning — authorized but no homes.
+            if viewModel.homesVisibilityWarning {
+                homesWarningBanner
+            }
+
             Group {
                 switch viewModel.display {
                 case .initializing:
@@ -25,6 +30,8 @@ struct StatusView: View {
                     debugView
                 case .resetConfirm:
                     resetConfirmView
+                case .error(let message):
+                    errorView(message)
                 }
             }
             .frame(maxWidth: .infinity)
@@ -33,23 +40,30 @@ struct StatusView: View {
             Spacer(minLength: 0)
 
             Divider()
-            HStack(spacing: 6) {
-                Image(systemName: viewModel.pairedCount > 0 ? "person.fill.checkmark" : "person.fill.xmark")
-                    .imageScale(.small)
-                Text(viewModel.pairedCount > 0 ? "paired" : "not paired")
-                Text("·").foregroundColor(.secondary)
-                Image(systemName: "lock.fill").imageScale(.small)
-                Text("\(viewModel.accessoryCount) locks tracked")
-                Text("·").foregroundColor(.secondary)
-                Text("v\(Bundle.bridgeMarketingVersion)")
+            VStack(spacing: 5) {
+                HStack(spacing: 6) {
+                    Image(systemName: viewModel.pairedCount > 0 ? "person.fill.checkmark" : "person.fill.xmark")
+                        .imageScale(.small)
+                    Text(viewModel.pairedCount > 0 ? "paired" : "not paired")
+                    Text("·").foregroundColor(.secondary)
+                    Image(systemName: "lock.fill").imageScale(.small)
+                    Text("\(viewModel.accessoryCount) locks tracked")
+                    Text("·").foregroundColor(.secondary)
+                    Text("v\(Bundle.bridgeMarketingVersion)")
+                }
+                .font(.caption.monospaced())
+                .foregroundColor(.secondary)
+
+                Link("HomeAssistant Integration",
+                     destination: URL(string: "https://github.com/mikenemat/HA-LockBridge")!)
+                    .font(.caption2)
             }
-            .font(.caption.monospaced())
-            .foregroundColor(.secondary)
         }
         .padding(28)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.easeInOut(duration: 0.2), value: viewModel.display)
         .animation(.easeInOut(duration: 0.2), value: viewModel.pendingRequest)
+        .animation(.easeInOut(duration: 0.2), value: viewModel.homesVisibilityWarning)
     }
 
     // MARK: - Pair banner (shown inline, not as a separate screen)
@@ -64,6 +78,11 @@ struct StatusView: View {
                 Text(pending.clientName)
                     .font(.body.bold())
             }
+            // Show the requester IP so the user can sanity-check who's asking
+            // before approving — the click at the console IS the auth.
+            Text("from \(pending.requesterIP)")
+                .font(.caption.monospaced())
+                .foregroundColor(.secondary)
             HStack(spacing: 12) {
                 Button("Deny", role: .destructive) { viewModel.denyTapped() }
                     .keyboardShortcut(.escape, modifiers: [])
@@ -76,6 +95,28 @@ struct StatusView: View {
         .padding(12)
         .frame(maxWidth: .infinity)
         .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// Banner shown when the bridge is authorized for HomeKit but sees zero
+    /// homes — almost always means the Mac's iCloud HomeKit session lost sync.
+    /// Without surfacing this, the appliance silently controls nothing.
+    private var homesWarningBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "icloud.slash.fill")
+                .foregroundColor(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("No HomeKit homes visible")
+                    .font(.callout.bold())
+                Text("This Mac is authorized for HomeKit but sees no homes. Check that it's signed into iCloud with Home enabled in System Settings.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
     }
 
     // MARK: - Screens
@@ -223,31 +264,51 @@ struct StatusView: View {
     /// in the menu-bar dropdown, now inline since there's no tray icon.
     private var controlBar: some View {
         HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Toggle("Start at Login", isOn: Binding(
-                    get: { viewModel.loginItemEnabled },
-                    set: { _ in viewModel.toggleLoginItemTapped() }
-                ))
-                .toggleStyle(.switch)
-                .disabled(!viewModel.loginItemAvailable)
-                .font(.callout)
-
-                // Explain WHY the toggle is disabled, so "intentionally off"
-                // doesn't look like "broken". SMAppService only registers a
-                // login item from /Applications (or ~/Applications) — a
-                // build-folder / translocated dev build reports .notFound,
-                // which drives loginItemAvailable = false.
-                if !viewModel.loginItemAvailable {
-                    Text("Move the app to /Applications to enable")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Start at Login").font(.callout)
+                // macOS doesn't let a Mac Catalyst app register itself as a
+                // login item (SMAppService.mainApp reports .notFound — see
+                // LoginItemManager), so instead of a toggle that can't work we
+                // send the user to the System Settings pane to add it once.
+                Text("Add HA-LockBridge in System Settings › Login Items so it relaunches after a reboot.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Open Login Items…") { viewModel.openLoginItemsSettingsTapped() }
+                    .buttonStyle(.borderless)
+                    .font(.caption2)
             }
 
             Spacer()
 
             Button("Reset Pairing…", role: .destructive) { viewModel.resetTapped() }
                 .buttonStyle(.bordered)
+            Button("Quit") { viewModel.quitTapped() }
+                .buttonStyle(.bordered)
+        }
+    }
+
+    /// Shown when the bridge server failed to start (corrupt config.json,
+    /// port 8765 already in use, etc.). Without this the "advertising on your
+    /// network" screen would show with a dead server behind it.
+    private func errorView(_ message: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.octagon.fill")
+                .font(.system(size: 44))
+                .foregroundColor(.red)
+            Text("Bridge failed to start")
+                .font(.headline)
+            Text(message)
+                .font(.callout.monospaced())
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .textSelection(.enabled)
+                .padding(.horizontal, 8)
+            Text("Fix the issue above (e.g. free port 8765 or repair the config file), then quit and relaunch the bridge.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 8)
             Button("Quit") { viewModel.quitTapped() }
                 .buttonStyle(.bordered)
         }
@@ -364,6 +425,16 @@ struct StatusView: View {
                         "currently unreachable",
                         formatDurationSec(elapsed))
             }
+        case .writeFailed(let action, let detail):
+            return ("xmark.octagon",
+                    .red,
+                    "\(action) failed — \(detail)",
+                    "")
+        case .focusGrabFailed:
+            return ("macwindow.badge.plus",
+                    .orange,
+                    "focus grab failed — write may stall",
+                    "")
         }
     }
 

@@ -6,6 +6,7 @@ import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 
 from .const import DOMAIN, PLATFORMS
@@ -19,10 +20,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     client = LockBridgeClient(hass, entry)
     try:
         await client.async_initial_snapshot()
+    except PermissionError as err:
+        # 401: the stored token is stale/revoked. Start the reauth flow rather
+        # than retrying forever with a token the bridge will keep rejecting.
+        raise ConfigEntryAuthFailed(
+            "The bridge rejected the stored access token; re-pairing required."
+        ) from err
     except Exception as err:  # noqa: BLE001
-        _LOGGER.error("Failed initial snapshot from bridge: %s", err)
-        # We still proceed — the client will keep retrying. Entities will be
-        # unavailable until the bridge is reachable.
+        # Bridge unreachable (Mac asleep/offline, network down). Raise
+        # ConfigEntryNotReady so HA retries setup with backoff instead of
+        # silently leaving the entry with zero entities until a manual reload.
+        # Log type only — never the raw exception (it can embed request URLs).
+        _LOGGER.debug("Initial snapshot failed (%s); will retry", type(err).__name__)
+        raise ConfigEntryNotReady(
+            "Could not reach the HA-LockBridge for the initial snapshot."
+        ) from err
 
     # Register the bridge itself as a "hub" device. Lock entities reference
     # this device via `via_device` so HA's UI can group them under their hub.
@@ -38,6 +50,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = client
+
+    # If the WS handshake later gets a 401 (token revoked while running), start
+    # the reauth flow. Scheduling via async_create_task keeps this off the WS
+    # loop's thread of control.
+    def _start_reauth() -> None:
+        _LOGGER.debug("Bridge rejected WS token; starting reauth")
+        entry.async_start_reauth(hass)
+
+    client.register_auth_failed_callback(_start_reauth)
 
     # Set up platforms FIRST so entities subscribe to dispatcher signals
     # (SIGNAL_CONNECTED / SIGNAL_STATE_UPDATE) before the WS loop has a

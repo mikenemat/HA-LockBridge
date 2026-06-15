@@ -14,6 +14,10 @@
         "title": "Pair with HA-LockBridge",
         "description": "Found a HA-LockBridge at {host}:{port}. Click Submit to start pairing. The bridge's Mac will pop up a window with **Approve** and **Deny** buttons — click Approve."
       },
+      "reauth_confirm": {
+        "title": "Re-pair with HA-LockBridge",
+        "description": "The bridge at {host}:{port} no longer accepts the saved access token (it was reset or revoked). Click Submit, then click **Approve** in the window on the bridge's Mac to issue a fresh token. Nothing else changes."
+      },
       "pair_denied": {
         "title": "Pairing denied"
       },
@@ -41,10 +45,12 @@
     },
     "abort": {
       "already_configured": "This bridge is already configured. (Its host/port were updated if they changed.)",
+      "already_paired": "This bridge is already paired with a Home Assistant instance. A bridge only allows one pairing at a time — on the bridge's Mac, click **Reset Pairing**, then add the integration again.",
       "missing_uuid_txt": "Bridge announcement is missing the UUID record — incompatible version.",
       "pair_denied": "You denied the pairing request on the bridge. To try again, remove this from the discovered list and re-add.",
       "pair_expired": "The pairing request timed out without approval. Re-add to try again.",
-      "cannot_connect": "Could not reach the bridge to complete pairing."
+      "cannot_connect": "Could not reach the bridge to complete pairing.",
+      "reauth_successful": "Re-pairing succeeded — the bridge issued a fresh access token."
     }
   },
   "options": {
@@ -60,6 +66,35 @@
     },
     "abort": {
       "cannot_connect": "Could not reach the bridge to fetch the current accessory list."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "bridge_online": {
+        "name": "Bridge online"
+      },
+      "jammed": {
+        "name": "Jammed"
+      },
+      "low_battery": {
+        "name": "Low battery"
+      }
+    },
+    "sensor": {
+      "battery": {
+        "name": "Battery"
+      }
+    },
+    "lock": {
+      "lock": {
+        "name": "Lock"
+      }
+    }
+  },
+  "issues": {
+    "unsupported_protocol": {
+      "title": "HA-LockBridge: integration is older than the bridge",
+      "description": "The HA-LockBridge app reports wire protocol {bridge_protocol}, but this Home Assistant integration only understands up to {supported_protocol}. The integration keeps working with the features it knows, but newer bridge features may be ignored. Update the HA-LockBridge integration (via HACS) to clear this."
     }
   }
 }

@@ -56,6 +56,9 @@ final class BridgeServer {
             },
             onRemoved: { [weak self] id in
                 self?.broadcastRemoval(id)
+            },
+            onWriteReverted: { [weak self] id, target, reason, name in
+                self?.broadcastWriteReverted(id: id, target: target, reason: reason, accessoryName: name)
             }
         )
     }
@@ -81,11 +84,27 @@ final class BridgeServer {
                     logger: serverLogger
                 )
 
+                // Bound how long an idle HTTP connection can sit holding a
+                // socket open without sending us a request. Without this, a
+                // client that connects and never sends (or stalls mid-body)
+                // pins an event-loop slot indefinitely. The read timeout fires
+                // on read inactivity; HTTPIdleTimeoutHandler closes on that
+                // event. Both are removed on WS upgrade (see the upgrade
+                // completionHandler) — long-lived WS connections legitimately
+                // send only periodic pongs and have their own pong timeout.
+                let idleHandler = IdleStateHandler(readTimeout: .seconds(30))
+                let idleTimeoutHandler = HTTPIdleTimeoutHandler(logger: serverLogger)
+
                 let wsUpgrader = NIOWebSocketServerUpgrader(
                     maxFrameSize: 1 << 14,
                     shouldUpgrade: { (channel, head) -> EventLoopFuture<HTTPHeaders?> in
                         let authed = Self.isAuthorized(head: head, store: store)
-                        serverLogger("DEBUG shouldUpgrade called: uri=\(head.uri) authed=\(authed)")
+                        // Log only the path, never the raw URI — HA's WS connect
+                        // historically carried the bearer token as a `?token=`
+                        // query param, so logging head.uri leaked a
+                        // token-equivalent secret to stderr on every connect.
+                        let path = URLComponents(string: head.uri)?.path ?? head.uri
+                        serverLogger("WS upgrade request: path=\(path) authed=\(authed)")
                         if authed {
                             return channel.eventLoop.makeSucceededFuture(HTTPHeaders())
                         }
@@ -112,13 +131,22 @@ final class BridgeServer {
                         // decode incoming WebSocketFrames as HTTPServerRequestPart
                         // and crash with a NIOAny type mismatch.
                         context.pipeline.removeHandler(httpHandler, promise: nil)
+                        // Drop the HTTP idle timeout for the now-WS connection —
+                        // WS clients legitimately stay quiet between pongs and
+                        // have their own pong-timeout liveness check.
+                        context.pipeline.removeHandler(idleTimeoutHandler, promise: nil)
+                        context.pipeline.removeHandler(idleHandler, promise: nil)
                     }
                 )
 
-                return channel.pipeline.configureHTTPServerPipeline(
-                    withServerUpgrade: httpConfig,
-                    withErrorHandling: true
-                ).flatMap {
+                return channel.pipeline.addHandler(idleHandler).flatMap {
+                    channel.pipeline.addHandler(idleTimeoutHandler)
+                }.flatMap {
+                    channel.pipeline.configureHTTPServerPipeline(
+                        withServerUpgrade: httpConfig,
+                        withErrorHandling: true
+                    )
+                }.flatMap {
                     channel.pipeline.addHandler(httpHandler)
                 }
             }
@@ -181,6 +209,17 @@ final class BridgeServer {
         }
     }
 
+    /// Fan out a `write_reverted` envelope after the bridge silently rolled
+    /// an optimistic write back (budget exhausted or non-retryable error).
+    /// The UI revert stays silent; this event is purely for HA-side
+    /// automation/observability (see TODO Phase 1). Additive — old
+    /// integrations ignore the unknown type.
+    private func broadcastWriteReverted(id: String, target: String, reason: String, accessoryName: String) {
+        for conn in wsConnections {
+            conn.send(envelope: .writeReverted(id: id, target: target, reason: reason, accessoryName: accessoryName))
+        }
+    }
+
     /// Forcibly close every live WebSocket. Called by AppDelegate.performReset
     /// after the token store is wiped, so HA's authenticated WS doesn't
     /// outlive the token it was upgraded with. HA's client will see the
@@ -224,13 +263,26 @@ final class BridgeServer {
     }
 }
 
-// MARK: - WS envelope (shared encoder for snapshot/state/removed)
+// MARK: - Wire protocol version
+
+/// Integer wire-protocol version, sent additively in the WS `hello` envelope
+/// and the `/info` JSON. Distinct from `Bundle.bridgeMarketingVersion` (a
+/// marketing string that changes on every release) and the Bonjour `api`
+/// TXT value (which stays "1" for discovery compatibility). Bump ONLY on a
+/// breaking wire change so the integration's protocol gate stays meaningful.
+let bridgeWireProtocolVersion = 1
+
+// MARK: - WS envelope (shared encoder for snapshot/state/removed/write_reverted)
 
 enum WSEnvelope {
     case hello
     case snapshot([AccessoryState])
     case state(AccessoryState)
     case removed(String)
+    /// An optimistic write was rolled back. `target` is "secured"/"unsecured",
+    /// `reason` is "budget_exhausted"/"error". Additive — old integrations that
+    /// don't recognize the type ignore it.
+    case writeReverted(id: String, target: String, reason: String, accessoryName: String)
 
     func encode() -> Data? {
         switch self {
@@ -238,7 +290,8 @@ enum WSEnvelope {
             return try? JSONSerialization.data(withJSONObject: [
                 "type": "hello",
                 "server": "ha-lockbridge",
-                "version": Bundle.bridgeMarketingVersion
+                "version": Bundle.bridgeMarketingVersion,
+                "protocol": bridgeWireProtocolVersion
             ], options: [.sortedKeys])
         case .snapshot(let states):
             let body: [String: Any] = [
@@ -256,6 +309,14 @@ enum WSEnvelope {
             return try? JSONSerialization.data(withJSONObject: [
                 "type": "removed",
                 "id": id
+            ], options: [.sortedKeys])
+        case .writeReverted(let id, let target, let reason, let accessoryName):
+            return try? JSONSerialization.data(withJSONObject: [
+                "type": "write_reverted",
+                "id": id,
+                "target": target,
+                "reason": reason,
+                "accessory_name": accessoryName
             ], options: [.sortedKeys])
         }
     }
@@ -409,6 +470,37 @@ final class WSConnection: ChannelInboundHandler {
     }
 }
 
+// MARK: - HTTP idle timeout
+
+/// Closes a connection that goes read-idle while still in HTTP mode (a client
+/// that connects and never sends, or stalls mid-request). Paired with an
+/// `IdleStateHandler` upstream; removed from the pipeline on WS upgrade so
+/// long-lived WebSocket connections — which legitimately stay quiet between
+/// 15s pongs — aren't killed (they have their own pong-timeout check).
+///
+/// NIO ChannelInboundHandlers are always invoked on a single event loop's
+/// thread; `@unchecked Sendable` reflects that runtime contract (required so
+/// the handler can be captured by the Sendable upgrade completionHandler that
+/// removes it).
+final class HTTPIdleTimeoutHandler: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable {
+    typealias InboundIn = Any
+
+    private let logger: (String) -> Void
+
+    init(logger: @escaping (String) -> Void) {
+        self.logger = logger
+    }
+
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        if event is IdleStateHandler.IdleStateEvent {
+            logger("HTTP connection idle — closing")
+            context.close(promise: nil)
+            return
+        }
+        context.fireUserInboundEventTriggered(event)
+    }
+}
+
 // MARK: - HTTP request handler
 
 // NIO ChannelInboundHandlers are always invoked on a single event loop's
@@ -461,7 +553,14 @@ final class HTTPRequestHandler: ChannelInboundHandler, RemovableChannelHandler, 
                 bodyBuffer = context.channel.allocator.buffer(capacity: chunk.readableBytes)
             }
             if (bodyBuffer?.readableBytes ?? 0) + chunk.readableBytes > Self.maxBodyBytes {
-                respondJSON(context: context, status: .payloadTooLarge, body: ["error": "body too large"])
+                // Close the connection after a 413 — the rest of the
+                // oversized body is still streaming in and we don't want to
+                // keep reading (and buffering) it just to drop it. Closing
+                // also stops a misbehaving client from holding the
+                // connection open mid-upload.
+                respondJSON(context: context, status: .payloadTooLarge, body: ["error": "body too large"], close: true)
+                requestHead = nil
+                bodyBuffer = nil
                 return
             }
             bodyBuffer?.writeBuffer(&chunk)
@@ -479,22 +578,20 @@ final class HTTPRequestHandler: ChannelInboundHandler, RemovableChannelHandler, 
     private func handle(head: HTTPRequestHead, body: ByteBuffer?, context: ChannelHandlerContext) {
         let path = URLComponents(string: head.uri)?.path ?? head.uri
 
-        // DEBUG: log every incoming request so we can see what's reaching the
-        // HTTP handler vs. being intercepted by the WS upgrader.
-        let upHdr = head.headers["upgrade"].first ?? "-"
-        let connHdr = head.headers["connection"].first ?? "-"
-        let wsVer = head.headers["sec-websocket-version"].first ?? "-"
-        let wsKey = head.headers["sec-websocket-key"].first ?? "-"
-        logger("DEBUG http-handler: \(head.method) \(path) upgrade=\(upHdr) conn=\(connHdr) wsv=\(wsVer) wsk=\(wsKey != "-" ? "yes" : "no")")
-
         // /health is unauthenticated so HA can use it as a liveness probe.
         if head.method == .GET, path == "/health" {
             DispatchQueue.main.async {
                 let count = self.monitor.snapshot().count
+                // `homes_visible` surfaces the most likely real-world
+                // appliance-rot mode (authorized but iCloud HomeKit sync
+                // dropped all homes). Additive field; HA reads it only if
+                // present.
+                let homesVisible = self.monitor.homesVisible()
                 context.eventLoop.execute {
                     self.respondJSON(context: context, status: .ok, body: [
                         "ok": true,
-                        "accessory_count": count
+                        "accessory_count": count,
+                        "homes_visible": homesVisible
                     ])
                 }
             }
@@ -507,7 +604,8 @@ final class HTTPRequestHandler: ChannelInboundHandler, RemovableChannelHandler, 
             respondJSON(context: context, status: .ok, body: [
                 "instance_id": store.instanceID,
                 "name": "HA-LockBridge",
-                "version": Bundle.bridgeMarketingVersion
+                "version": Bundle.bridgeMarketingVersion,
+                "protocol": bridgeWireProtocolVersion
             ])
             return
         }
@@ -645,10 +743,24 @@ final class HTTPRequestHandler: ChannelInboundHandler, RemovableChannelHandler, 
            let data = body.readBytes(length: body.readableBytes).map({ Data($0) }),
            let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let name = parsed["client_name"] as? String, !name.isEmpty {
-            clientName = name
+            // Bound the length so a hostile/garbage client_name can't blow up
+            // the banner layout or fill the log with a megabyte of text.
+            clientName = String(name.prefix(64))
         }
+        let requesterIP = context.remoteAddress?.ipAddress ?? "unknown"
         DispatchQueue.main.async {
-            let requestID = self.pairing.createRequest(clientName: clientName)
+            // Refuse a second initiate while one is already pending — without
+            // this, a second (possibly hostile) request silently swaps the
+            // banner under the user's cursor, a confused-deputy approval risk.
+            guard let requestID = self.pairing.createRequest(clientName: clientName, requesterIP: requesterIP) else {
+                context.eventLoop.execute {
+                    self.respondJSON(context: context, status: .conflict, body: [
+                        "error": "pair_in_progress",
+                        "detail": "A pair request is already pending approval at the bridge. Wait for it to be approved, denied, or to expire before initiating another."
+                    ])
+                }
+                return
+            }
             context.eventLoop.execute {
                 self.respondJSON(context: context, status: .ok, body: [
                     "request_id": requestID,
@@ -675,23 +787,29 @@ final class HTTPRequestHandler: ChannelInboundHandler, RemovableChannelHandler, 
         }
     }
 
-private func respondJSON(context: ChannelHandlerContext, status: HTTPResponseStatus, body: [String: Any]) {
+private func respondJSON(context: ChannelHandlerContext, status: HTTPResponseStatus, body: [String: Any], close: Bool = false) {
         let obj: Any = body
-        respondJSON(context: context, status: status, bodyAny: obj)
+        respondJSON(context: context, status: status, bodyAny: obj, close: close)
     }
 
-    private func respondJSON(context: ChannelHandlerContext, status: HTTPResponseStatus, bodyAny: Any) {
+    private func respondJSON(context: ChannelHandlerContext, status: HTTPResponseStatus, bodyAny: Any, close: Bool = false) {
         let data = (try? JSONSerialization.data(withJSONObject: bodyAny, options: [.sortedKeys]))
             ?? Data("{}".utf8)
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "application/json")
         headers.add(name: "Content-Length", value: "\(data.count)")
-        headers.add(name: "Connection", value: "keep-alive")
+        headers.add(name: "Connection", value: close ? "close" : "keep-alive")
         let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
         context.write(wrapOutboundOut(.head(head)), promise: nil)
         var buffer = context.channel.allocator.buffer(capacity: data.count)
         buffer.writeBytes(data)
         context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
-        context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+        if close {
+            context.writeAndFlush(wrapOutboundOut(.end(nil))).whenComplete { _ in
+                context.close(promise: nil)
+            }
+        } else {
+            context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+        }
     }
 }

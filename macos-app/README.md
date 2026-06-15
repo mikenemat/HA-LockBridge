@@ -39,8 +39,8 @@ Edit `DevelopmentTeam.xcconfig` and replace **both** placeholders:
   the upstream `io.github.mikenemat` prefix; trying to enable the HomeKit
   capability on a build that uses someone else's prefix will fail. Pick
   something like `io.github.<your-github-handle>` or `com.<your-domain>`.
-  `.HALockBridge` is appended automatically, so the final bundle ID will be
-  e.g. `io.github.alice.HALockBridge`.
+  `.HALockBridgeApp` is appended automatically, so the final bundle ID will be
+  e.g. `io.github.alice.HALockBridgeApp`.
 
 This file is `.gitignore`d so neither value leaves your machine.
 
@@ -101,10 +101,11 @@ Ctrl-C.
 
 Builds the .app (if needed) and copies it to `/Applications/HA-LockBridge.app`.
 
-To enable auto-start at login, launch the .app and flip the **Start at Login**
-toggle in the app window — the app uses `SMAppService` to register itself as
-a Login Item. macOS surfaces this in System Settings → General → Login Items
-where it can be disabled at any time.
+To enable auto-start at login, launch the .app and click **Open Login Items…**
+under *Start at Login*, then add **HA-LockBridge** in System Settings → General
+→ Login Items. (macOS doesn't let a Mac Catalyst app register itself as a login
+item — `SMAppService.mainApp` returns `.notFound` — so this is a one-time manual
+step; it can be disabled from the same pane at any time.)
 
 To remove everything:
 
@@ -178,23 +179,36 @@ macos-app/
 │   ├── generate_icon.py            ← regenerate the app icon from scratch
 │   └── Assets.xcassets/AppIcon.appiconset/
 └── Sources/HALockBridge/
-    ├── AppDelegate.swift           ← bootstraps everything
-    ├── MainSceneDelegate.swift     ← hosts the SwiftUI status window
-    ├── StatusView.swift            ← SwiftUI pairing/status UI
-    ├── StatusViewModel.swift       ← observable state for the window
-    ├── StatusBarController.swift   ← menu bar item (Status/Reset/Start at Login/Quit)
-    ├── LoginItemManager.swift      ← SMAppService wrapper for Start at Login
-    ├── HomeKitMonitor.swift        ← HMHomeManager observer + state store
-    ├── AccessoryState.swift        ← Codable lock state + lifecycle derivation
-    ├── BridgeServer.swift          ← NIO HTTP + WebSocket server
-    ├── BonjourService.swift        ← NetService.publish for zeroconf
-    ├── PairingManager.swift        ← in-app pairing request lifecycle
-    └── Config.swift                ← config.json schema + thread-safe TokenStore
+    ├── AppDelegate.swift            ← bootstraps everything
+    ├── MainSceneDelegate.swift      ← hosts the SwiftUI status window
+    ├── StatusView.swift             ← SwiftUI pairing/status UI (incl. Stats & Debug)
+    ├── StatusViewModel.swift        ← observable state for the window
+    ├── LoginItemManager.swift       ← opens System Settings → Login Items (Catalyst can't self-register)
+    ├── HomeKitMonitor.swift         ← HMHomeManager observer + state store + write-retry
+    ├── AccessoryState.swift         ← Codable lock state + lifecycle derivation
+    ├── AccessoryIdentityCache.swift ← stable wireID ↔ (home, name, serial) mapping across re-signs
+    ├── BridgeServer.swift           ← NIO HTTP + WebSocket server
+    ├── BonjourService.swift         ← NetService.publish for zeroconf
+    ├── PairingManager.swift         ← in-app pairing request lifecycle
+    ├── InteractionLog.swift         ← rolling log of HA/HomeKit interactions (Stats & Debug)
+    ├── LockEventLog.swift           ← rolling log of lock errors/warnings (Stats & Debug)
+    ├── Version.swift                ← app + wire-protocol version strings (from CFBundleShortVersionString)
+    └── Config.swift                 ← config.json schema + thread-safe TokenStore
 ```
 
 ## Runtime config
 
-Lives at `~/Library/Application Support/HALockBridge/config.json`:
+The App Store build is sandboxed, so its config lives inside the app's
+container:
+
+```
+~/Library/Containers/<bundle-id>/Data/Library/Application Support/HALockBridge/config.json
+```
+
+where `<bundle-id>` is your bundle identifier (e.g.
+`io.github.mikenemat.HALockBridgeApp`). A self-built, *non-sandboxed* copy uses
+the classic `~/Library/Application Support/HALockBridge/config.json` instead.
+Contents:
 
 ```json
 {
@@ -228,7 +242,7 @@ full lock control — keep this file private and don't share it.
 Server-pushed JSON envelopes:
 
 ```json
-{"type": "hello", "server": "ha-lockbridge", "version": "0.5.0"}
+{"type": "hello", "server": "ha-lockbridge", "version": "<app-version>"}
 {"type": "snapshot", "accessories": [...]}
 {"type": "state", "accessory": {...}}
 {"type": "removed", "id": "<uuid>"}

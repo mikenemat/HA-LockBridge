@@ -96,5 +96,10 @@ up automatically).
 
 *Settings → Devices & Services → HA-LockBridge → ⋮ → Delete*. The bridge
 keeps the token on its side; if you re-add later it'll appear as a new pairing.
-You can clean it up on the bridge by removing the entry from
-`~/Library/Application Support/HALockBridge/config.json` on the bridge host.
+To clean it up on the bridge, use the **Reset Pairing** button in the bridge
+window (the App Store build is sandboxed, so its `config.json` lives inside the
+app's container at
+`~/Library/Containers/<bundle-id>/Data/Library/Application Support/HALockBridge/config.json`
+(e.g. `<bundle-id>` = `io.github.mikenemat.HALockBridgeApp`) rather than the
+classic `~/Library/Application Support/HALockBridge/` — Reset Pairing avoids
+having to find it).

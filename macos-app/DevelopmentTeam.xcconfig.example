@@ -6,3 +6,15 @@
 // Free "Personal Team" accounts work fine for personal/local use; the cert
 // rotates every 7 days, so the bridge needs a rebuild weekly.
 DEVELOPMENT_TEAM = YOUR_TEAM_ID_HERE
+
+// BUNDLE_ID_PREFIX is a reverse-domain prefix unique to *your* Apple developer
+// account. Apple registers bundle IDs per team, so you can't reuse the upstream
+// io.github.mikenemat prefix; trying to enable the HomeKit capability on a build
+// that uses someone else's prefix will fail. Pick something like
+// io.github.<your-github-handle> or com.<your-domain>. ".HALockBridgeApp" is
+// appended automatically, so the final bundle ID will be e.g.
+// io.github.alice.HALockBridgeApp.
+//
+// This MUST be set: with no value, the bundle ID resolves to the invalid
+// ".HALockBridgeApp" (leading dot) and the build fails.
+BUNDLE_ID_PREFIX = io.github.YOUR_GITHUB_HANDLE_HERE

@@ -61,10 +61,20 @@ final class AccessoryIdentityCache {
     /// from before a re-sign and migrates it to the new hmUUID. Only when
     /// both lookups miss does it call `computeIfMissing()` and persist the
     /// returned wire ID — that's the only path that creates a new record.
+    ///
+    /// `serialHash`, when non-nil, is the content-addressed (serial-derived)
+    /// wire ID for this accessory — authoritative because it's tied to the
+    /// physical lock's firmware serial. It's used to VERIFY a (home, name)
+    /// migration: if a name match's cached wireID disagrees with the
+    /// serial-hash, the cached record is for a *different* physical lock that
+    /// happens to share the name, so the migration is refused and the
+    /// authoritative serial-hash is used instead. Nil when no serial is
+    /// available (the wireID is then a non-verifiable fallback UUID).
     func wireID(
         forHMUUID hmUUID: String,
         accessoryName: String,
         homeName: String?,
+        serialHash: String? = nil,
         computeIfMissing: () -> String
     ) -> String {
         lock.lock()
@@ -87,23 +97,44 @@ final class AccessoryIdentityCache {
         }
 
         // hmUUID miss — try resign-survival match by (homeName, accessoryName).
-        let nameMatch = records.first { _, rec in
+        // Refuse the migration if MORE THAN ONE record matches: two locks
+        // sharing a name (e.g. both literally "Lock") would otherwise let the
+        // first arbitrary match claim — and swap into — the wrong wire ID,
+        // actuating the wrong physical lock. When the match is ambiguous we
+        // fall through to computeIfMissing(), minting a fresh wire ID; a
+        // one-time HA re-pair of that lock is far safer than silently
+        // commanding the wrong deadbolt.
+        let nameMatches = records.filter { _, rec in
             rec.accessoryName == accessoryName && rec.homeName == homeName
         }
-        if let (oldKey, rec) = nameMatch {
-            // Migrate the record to the new hmUUID. Remove the stale key
-            // so we don't accumulate ghost entries after every re-sign.
-            records.removeValue(forKey: oldKey)
-            var migrated = rec
-            migrated.hmUUID = hmUUID
-            records[hmUUID] = migrated
-            let snapshot = records
-            lock.unlock()
-            persist(snapshot)
-            return rec.wireID
+        // Verify a single name match against the serial-hash when we have one.
+        // A serial-hash that disagrees with the cached wireID proves the
+        // matched record belongs to a different physical lock that merely
+        // shares the name — refuse the migration and use the authoritative
+        // serial-hash instead (it'll be persisted below).
+        if nameMatches.count == 1, let (oldKey, rec) = nameMatches.first {
+            if let sh = serialHash, sh != rec.wireID {
+                FileHandle.standardError.write(Data("[identity-cache] refusing (home, name) migration for \"\(accessoryName)\" — serial-hash \(sh) disagrees with cached wireID \(rec.wireID); using the serial-hash\n".utf8))
+            } else {
+                // Migrate the record to the new hmUUID. Remove the stale key
+                // so we don't accumulate ghost entries after every re-sign.
+                records.removeValue(forKey: oldKey)
+                var migrated = rec
+                migrated.hmUUID = hmUUID
+                records[hmUUID] = migrated
+                let snapshot = records
+                lock.unlock()
+                persist(snapshot)
+                return rec.wireID
+            }
         }
+        let ambiguous = nameMatches.count > 1
 
-        // Both lookups missed. New accessory — compute, persist, return.
+        // Both lookups missed (or the name match was ambiguous and refused).
+        // New accessory — compute, persist, return.
+        if ambiguous {
+            FileHandle.standardError.write(Data("[identity-cache] refusing ambiguous (home, name) migration for \"\(accessoryName)\" — \(nameMatches.count) records share that name; minting a fresh wire ID instead of risking the wrong lock\n".utf8))
+        }
         let newWireID = computeIfMissing()
         records[hmUUID] = AccessoryIdentityRecord(
             wireID: newWireID,
@@ -129,10 +160,14 @@ final class AccessoryIdentityCache {
         if let existing = records[hmUUID] {
             return existing.wireID
         }
-        let nameMatch = records.first { _, rec in
+        // Mirror wireID(...)'s ambiguity refusal: don't hand back a wire ID by
+        // (home, name) when more than one record shares that name — the match
+        // could be the wrong physical lock.
+        let nameMatches = records.filter { _, rec in
             rec.accessoryName == accessoryName && rec.homeName == homeName
         }
-        return nameMatch?.value.wireID
+        guard nameMatches.count == 1 else { return nil }
+        return nameMatches.first?.value.wireID
     }
 
     /// All currently-cached records. Used by the diagnostics endpoint so

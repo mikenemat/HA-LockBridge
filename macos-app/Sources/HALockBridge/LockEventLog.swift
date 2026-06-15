@@ -50,6 +50,14 @@ final class LockEventLog {
         /// accessory is currently unreachable). Once closed, it holds
         /// the total wall-clock time the accessory was unreachable.
         case unreachableGap(durationSec: Double?)
+        /// A HomeKit write failed with a non-82 (non-retryable) error. The
+        /// optimistic state was reverted. `detail` carries the localized
+        /// HomeKit error so the Stats page can show why.
+        case writeFailed(targetAction: String, detail: String)
+        /// The app tried to grab foreground focus for a lock write but was
+        /// still not `.active` afterwards — HomeKit may stall the write. A
+        /// diagnostic for the appliance-mode focus invariant.
+        case focusGrabFailed
     }
 
     struct Event: Identifiable, Equatable {
@@ -73,6 +81,16 @@ final class LockEventLog {
     // entire app run (the Stats page scrolls it). Event rate is low (lock
     // operations + reachability gaps), so this stays small in practice.
 
+    /// Index of currently-open `.unreachableGap` events: accessoryID → event
+    /// ID. Lets `openGapID(forAccessory:)` be O(1) instead of an O(n) reverse
+    /// scan of the (unbounded) history. Maintained by `record` (insert on a
+    /// gap-open), `update` (remove when a gap closes), and `byID` lookups.
+    private var openGapByAccessory: [String: UUID] = [:]
+    /// Index of event positions by ID so `update(id:)` is O(1) instead of an
+    /// O(n) `firstIndex`. Stays valid because events are only ever appended
+    /// (never removed) — an index never shifts once assigned.
+    private var indexByID: [UUID: Int] = [:]
+
     /// Fires after each `record(_:)` or `update(id:_:)`. AppDelegate
     /// subscribes and pushes the full history into StatusViewModel so the
     /// Stats page repaints.
@@ -80,7 +98,12 @@ final class LockEventLog {
 
     func record(_ event: Event) {
         lock.lock()
+        let idx = events.count
         events.append(event)
+        indexByID[event.id] = idx
+        if case .unreachableGap(let dur) = event.kind, dur == nil {
+            openGapByAccessory[event.accessoryID] = event.id
+        }
         lock.unlock()
         onChange?()
     }
@@ -92,8 +115,14 @@ final class LockEventLog {
     func update(id: UUID, transform: (inout Event) -> Void) {
         lock.lock()
         var changed = false
-        if let idx = events.firstIndex(where: { $0.id == id }) {
+        if let idx = indexByID[id] {
             transform(&events[idx])
+            // If this update closed an open gap, drop it from the open-gap
+            // index so a later open for the same accessory isn't shadowed.
+            if case .unreachableGap(let dur) = events[idx].kind, dur != nil,
+               openGapByAccessory[events[idx].accessoryID] == id {
+                openGapByAccessory.removeValue(forKey: events[idx].accessoryID)
+            }
             changed = true
         }
         lock.unlock()
@@ -102,23 +131,25 @@ final class LockEventLog {
 
     /// Find the most recently opened, still-open gap for `accessoryID`.
     /// Used by the reachability delegate to locate which event to
-    /// close on a true-recovery. Returns nil if no open gap exists.
+    /// close on a true-recovery. Returns nil if no open gap exists. O(1)
+    /// via the `openGapByAccessory` index.
     func openGapID(forAccessory accessoryID: String) -> UUID? {
         lock.lock(); defer { lock.unlock() }
-        // Reverse iterate — most recent first.
-        for event in events.reversed() {
-            if event.accessoryID == accessoryID,
-               case .unreachableGap(let dur) = event.kind,
-               dur == nil {
-                return event.id
-            }
-        }
-        return nil
+        return openGapByAccessory[accessoryID]
     }
 
     /// The entire history, most-recent first.
     func all() -> [Event] {
         lock.lock(); defer { lock.unlock() }
         return events.reversed()
+    }
+
+    /// The newest `limit` events, most-recent first. History stays unbounded
+    /// in memory; this caps what's pushed into the SwiftUI @Published list so
+    /// the per-event copy + SwiftUI diff on the main (HomeKit) thread stays
+    /// O(limit) instead of O(history).
+    func recent(_ limit: Int) -> [Event] {
+        lock.lock(); defer { lock.unlock() }
+        return events.suffix(limit).reversed()
     }
 }

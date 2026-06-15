@@ -4,6 +4,100 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.6.4] — 2026-06-15
+
+Large hardening + features batch from the TODO.md backlog. **The Home Assistant
+integration (bumped to 0.6.0) stays fully backward-compatible with older bridge
+versions** — every new wire field/envelope is additive and read defensively, and
+the WS still authenticates against bridges that only accept the `?token=` query.
+
+### Bridge (macOS app)
+
+#### Security
+- **Bearer token no longer written to bridge logs** — the WS-upgrade debug line
+  logged the full `?token=` URI on every connect. It now logs only the path.
+- **Pairing window hardened:** a second `/pair/initiate` is refused (409) while a
+  request is pending (kills the banner-swap confused-deputy); the approval banner
+  shows the requester's IP and only clears for the matching request id; terminal
+  pair requests are hard-deleted and their token nulled after the first approved
+  poll; `client_name` is length-bounded.
+
+#### Reliability & correctness
+- **Emit `removed` when a lock's wire id changes** — the root fix for the
+  duplicate-lock bug the 0.5.3 integration worked around.
+- Fixed an HMError-82 retry double-fire (timer + reachability waiter racing).
+- Superseded writes now revert to the genuine last-known state, not a frozen
+  transition snapshot.
+- Guard against in-flight completions resurrecting a forgotten accessory as a
+  phantom; identity-cache no longer swaps wire ids between same-named locks.
+- Non-retryable write failures are now recorded in Lock Errors/Warnings.
+- `SecRandomCopyBytes` failure is checked; oversized request bodies close the
+  connection; HTTP idle/read timeout added.
+
+#### Appliance robustness
+- **Cmd-W / Cmd-M / titlebar-double-click can no longer background-or-close the
+  window** (cleared style-mask bits + removed the menu commands).
+- The post-write focus re-grab is cancelled once the write settles, and the grab
+  is verified (`isActive`) with a Lock Errors entry if it fails.
+- **iCloud-session-rot warning:** authorized-but-no-homes for 120s surfaces a
+  banner (and `homes_visible` in `/health`).
+- Startup failure (corrupt config / port in use) now shows an error screen
+  instead of a lying "advertising" screen.
+- Recent-activity / Lock-Errors lists are capped in the UI for months-long uptime.
+
+#### New wire fields (all additive)
+- `write_reverted` WS envelope, `protocol: 1` in the `hello` envelope and
+  `/info`, `homes_visible` in `/health`.
+
+### Home Assistant integration — 0.6.0 (back-compat with old bridges preserved)
+- **Reauth flow:** a revoked token (e.g. after Reset Pairing) now starts HA's
+  re-authenticate flow instead of looping forever; raises `ConfigEntryNotReady`
+  when the bridge is unreachable at startup (no more permanent zero-entity entry).
+- **Bridge-health binary sensor** on the hub device (driven by WS-connected state).
+- **New locks appear without a restart** (dynamic entity creation), and a lock
+  whose state is `unknown` now shows **Unknown** instead of **Unlocked**.
+- **`ha_lockbridge_write_reverted` bus event** fired when the bridge gives up on a
+  write (consumed from the new envelope; old bridges simply never send it).
+- Tolerant `protocol` handshake (warn-only, never gates); the bridge `409
+  already_paired` is surfaced with a clear message; removed accessories go
+  unavailable instead of freezing; `SIGNAL_CONNECTED` is held until the first
+  fresh snapshot; pair-flow edge cases and error-toast wrapping fixed.
+- **Token hardening:** the token is no longer logged anywhere, and is sent via
+  both the `Authorization` header and the existing `?token=` query (so older
+  bridges keep authenticating).
+
+### Docs / CI
+- CLAUDE.md corrected (App Store release flow, sandboxed since 0.5.0, 90s
+  transition window, Catalyst login-item note, wire-protocol bump rule);
+  sandbox container config-path swept across PRIVACY/SECURITY/READMEs; CI now runs
+  pytest authoritatively plus hassfest + HACS validation; contributor onboarding
+  and the appliance-Mac setup checklist added.
+
+### Changed
+- `MARKETING_VERSION` 0.6.3 → 0.6.4, `CURRENT_PROJECT_VERSION` 17 → 18.
+- HA integration `manifest.json` 0.5.3 → 0.6.0 (versioned independently of the app).
+
+## [0.6.3] — 2026-06-15
+
+### Fixed
+- **"Start at Login" no longer shows a toggle that can't work.** The toggle was
+  driven by `SMAppService.mainApp`, which does **not** function on Mac
+  Catalyst: its status returns `.notFound` and registration never takes effect,
+  so the toggle was permanently greyed out even from a correctly-installed
+  /Applications App Store build. (ServiceManagement's "register the main app
+  bundle itself" path is a native-macOS facility that doesn't recognize a
+  Catalyst bundle; Apple documents the related `SMLoginItemSetEnabled` API as
+  unsupported under Catalyst.) Replaced with an **"Open Login Items…"** button
+  and a short note — add HA-LockBridge once in System Settings → General →
+  Login Items, which is reliable and one-time.
+
+### Added
+- **"HomeAssistant Integration" link in the status-window footer**, below the
+  pairing status / lock-count line, pointing at the GitHub repo.
+
+### Changed
+- `MARKETING_VERSION` 0.6.2 → 0.6.3, `CURRENT_PROJECT_VERSION` 16 → 17.
+
 ## [0.6.2] — 2026-06-08
 
 ### Fixed

@@ -10,9 +10,16 @@ The bridge generates and stores the following on the **bridge host** (your Mac):
 
 | Data | Where | Why |
 |---|---|---|
-| A random **instance UUID** | `~/Library/Application Support/HALockBridge/config.json` | Identifies this bridge to your HomeAssistant integration so it can find the bridge again after IP/hostname changes. |
+| A random **instance UUID** | `config.json` in the app's support directory (see note below) | Identifies this bridge to your HomeAssistant integration so it can find the bridge again after IP/hostname changes. |
 | **Bearer tokens** for paired clients | Same file, mode 0600 | Authenticates HomeAssistant when it talks to the bridge. |
 | Names of paired clients (e.g. "Home Assistant at home.local") | Same file | Displayed in the bridge's UI so you can tell which client is paired. |
+
+> **Where the support directory is.** The Mac App Store build is sandboxed, so
+> its support directory lives inside the app's container:
+> `~/Library/Containers/<bundle-id>/Data/Library/Application Support/HALockBridge/`
+> (where `<bundle-id>` is the app's bundle identifier, e.g.
+> `io.github.mikenemat.HALockBridgeApp`). A self-built, *non-sandboxed* copy
+> instead uses the classic `~/Library/Application Support/HALockBridge/`.
 
 The HomeAssistant integration stores the bearer token and bridge host/port
 inside its standard config entry (`/config/.storage/core.config_entries`),
@@ -53,7 +60,7 @@ The bridge does not access any other HomeKit data (cameras, sensors, etc.) — o
 ## Logs
 
 The bridge writes logs to:
-- `~/Library/Application Support/HALockBridge/` (config only — no logs)
+- the app's support directory (config only — no logs; see the path note above)
 - `stderr`, captured by the system log when launched as a Login Item
   (viewable via Console.app filtered to HA-LockBridge) or by your
   terminal when run interactively

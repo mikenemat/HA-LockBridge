@@ -48,12 +48,22 @@ do not port-forward `:8765` to the open internet.
   attacker on an open WiFi network could intercept tokens.
 - **Don't share the bridge's config file.** It contains tokens that grant
   full lock control.
-- **Periodically rotate tokens** by removing entries from `paired_clients` in
-  the bridge's config and re-pairing. (A built-in token rotation UI is on the
-  roadmap.)
+- **Periodically rotate tokens.** Use the bridge window's **Reset Pairing**
+  button to revoke every paired client at once, then re-pair from HA. (Editing
+  `paired_clients` in `config.json` by hand is awkward on the App Store build,
+  because the file lives inside the app's sandbox container — see the path note
+  below — and the running app may rewrite it; Reset Pairing is the supported
+  path. A per-client token rotation UI is on the roadmap.)
 - **Audit who's paired.** The bridge's window footer shows the number of
-  paired clients. `~/Library/Application Support/HALockBridge/config.json`
-  shows their names and pair dates.
+  paired clients. The `config.json` in the app's support directory shows their
+  names and pair dates.
+
+> **Where `config.json` lives.** The Mac App Store build is sandboxed, so the
+> file is inside the app's container:
+> `~/Library/Containers/<bundle-id>/Data/Library/Application Support/HALockBridge/config.json`
+> (where `<bundle-id>` is the app's bundle identifier, e.g.
+> `io.github.mikenemat.HALockBridgeApp`). A self-built, non-sandboxed copy uses
+> the classic `~/Library/Application Support/HALockBridge/config.json` instead.
 
 ## Known limitations
 

@@ -30,10 +30,11 @@ async def async_get_config_entry_diagnostics(
     # Best-effort live fetch of /info (no auth needed) to see what the bridge
     # currently reports — useful when entry.data is stale or wrong.
     bridge_info: dict[str, Any] = {}
+    bridge_health: dict[str, Any] = {}
+    session = async_get_clientsession(hass)
+    host = entry.data[CONF_HOST]
+    port = entry.data[CONF_PORT]
     try:
-        session = async_get_clientsession(hass)
-        host = entry.data[CONF_HOST]
-        port = entry.data[CONF_PORT]
         async with session.get(
             f"http://{host}:{port}/info",
             timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT),
@@ -43,7 +44,24 @@ async def async_get_config_entry_diagnostics(
                 "body": await resp.json() if resp.status == 200 else await resp.text(),
             }
     except Exception as err:  # noqa: BLE001
-        bridge_info = {"error": f"{type(err).__name__}: {err}"}
+        bridge_info = {"error": type(err).__name__}
+
+    # /health is also unauthenticated. Newer bridges may add an optional
+    # `homes_visible` bool; surface it IF present (never required).
+    try:
+        async with session.get(
+            f"http://{host}:{port}/health",
+            timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT),
+        ) as resp:
+            if resp.status == 200:
+                body = await resp.json()
+                bridge_health = {"status": resp.status}
+                if isinstance(body, dict) and "homes_visible" in body:
+                    bridge_health["homes_visible"] = body.get("homes_visible")
+            else:
+                bridge_health = {"status": resp.status}
+    except Exception as err:  # noqa: BLE001
+        bridge_health = {"error": type(err).__name__}
 
     states_snapshot: list[dict[str, Any]] = []
     if client is not None:
@@ -76,7 +94,11 @@ async def async_get_config_entry_diagnostics(
             "exists": client is not None,
             "connected": bool(client and client.connected),
             "accessory_count": len(client.states) if client else 0,
+            # Protocol the bridge advertised (None => not yet seen / old bridge).
+            "protocol": getattr(client, "protocol", None) if client else None,
+            "auth_failed": bool(client and getattr(client, "auth_failed", False)),
         },
         "bridge_info": bridge_info,
+        "bridge_health": bridge_health,
         "accessories": states_snapshot,
     }

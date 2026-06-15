@@ -133,7 +133,11 @@ class HALockBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._token: str | None = None
         self._accessories: list[dict[str, Any]] = []
         self._pair_task: asyncio.Task | None = None
-        self._pair_result: str | None = None  # "approved" / "denied" / "expired" / "error"
+        # "approved" / "denied" / "expired" / "error" / "already_paired"
+        self._pair_result: str | None = None
+        # Set when we're re-authenticating an existing entry (token revoked /
+        # bridge re-paired) rather than configuring a brand-new one.
+        self._reauth_entry: config_entries.ConfigEntry | None = None
 
     # ---------------------------------------------------------------- discovery
 
@@ -204,6 +208,38 @@ class HALockBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    # ---------------------------------------------------------------- reauth
+
+    async def async_step_reauth(
+        self, entry_data: dict[str, Any]
+    ) -> FlowResult:
+        """Entry point when HA detects the stored token is no longer valid
+        (401 on setup or WS handshake). We re-run the same approve-on-the-bridge
+        pair flow and update CONF_TOKEN in place."""
+        self._reauth_entry = self.hass.config_entries.async_get_entry(
+            self.context["entry_id"]
+        )
+        if self._reauth_entry is not None:
+            self._host = self._reauth_entry.data.get(CONF_HOST)
+            self._port = self._reauth_entry.data.get(CONF_PORT)
+            self._instance_id = self._reauth_entry.unique_id
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Confirm re-pair intent, then reuse the normal pair flow."""
+        if user_input is not None:
+            return await self.async_step_pair_in_progress()
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema({}),
+            description_placeholders={
+                "host": self._host or "",
+                "port": str(self._port or DEFAULT_PORT),
+            },
+        )
+
     # ---------------------------------------------------------------- pair
 
     async def async_step_pair_confirm(
@@ -238,8 +274,31 @@ class HALockBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Task completed — interpret result
         result = self._pair_result or "error"
         if result == "approved":
+            if self._reauth_entry is not None:
+                return self.async_show_progress_done(next_step_id="reauth_done")
             return self.async_show_progress_done(next_step_id="select_devices")
+        if result == "already_paired":
+            return self.async_show_progress_done(next_step_id="pair_already_paired")
         return self.async_show_progress_done(next_step_id=f"pair_{result}")
+
+    async def async_step_reauth_done(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Write the freshly-minted token back onto the existing entry and
+        reload it. No new entry, no re-selecting devices."""
+        entry = self._reauth_entry
+        if entry is None or not self._token:
+            return self.async_abort(reason="cannot_connect")
+        return self.async_update_reload_and_abort(
+            entry,
+            data={**entry.data, CONF_TOKEN: self._token},
+            reason="reauth_successful",
+        )
+
+    async def async_step_pair_already_paired(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        return self.async_abort(reason="already_paired")
 
     async def _do_pair(self) -> None:
         """Initiate + poll. Sets self._pair_result and (on success) self._token + self._accessories."""
@@ -255,6 +314,13 @@ class HALockBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 json={"client_name": client_name},
                 timeout=aiohttp.ClientTimeout(total=PAIR_INITIATE_TIMEOUT),
             ) as resp:
+                if resp.status == 409:
+                    # Bridge is already paired with another HA (single-pairing
+                    # model). Surface this distinctly so we can tell the user to
+                    # Reset Pairing on the bridge instead of a vague
+                    # "cannot connect".
+                    self._pair_result = "already_paired"
+                    return
                 if resp.status != 200:
                     self._pair_result = "error"
                     return
@@ -264,11 +330,14 @@ class HALockBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._pair_result = "error"
                     return
         except (aiohttp.ClientError, TimeoutError) as err:
-            _LOGGER.debug("Pair initiate failed: %s", err)
+            # Log type only — never the raw exception (it embeds the request URL).
+            _LOGGER.debug("Pair initiate failed (%s)", type(err).__name__)
             self._pair_result = "error"
             return
 
-        loop = asyncio.get_event_loop()
+        # Use the running loop's clock (get_event_loop is deprecated when there
+        # is no running loop; we are inside a task so there always is one).
+        loop = self.hass.loop
         deadline = loop.time() + PAIR_MAX_WAIT
         while loop.time() < deadline:
             try:
@@ -276,6 +345,12 @@ class HALockBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     f"{base}/pair/status/{request_id}",
                     timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT),
                 ) as resp:
+                    if resp.status == 404:
+                        # The bridge forgot this request id (expired/cleaned up
+                        # or never existed). Fail fast instead of spinning for
+                        # the full 5-minute deadline.
+                        self._pair_result = "expired"
+                        return
                     if resp.status != 200:
                         await asyncio.sleep(PAIR_POLL_INTERVAL)
                         continue
@@ -290,12 +365,14 @@ class HALockBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if not token:
                     self._pair_result = "error"
                     return
+                # The token is already committed on the bridge side at this
+                # point. If the follow-up accessory fetch fails (transient
+                # network blip), DON'T discard the approval — keep the token and
+                # let setup fetch the snapshot later. We just expose an empty
+                # selection list; the options flow can re-fetch.
                 accs = await _fetch_accessories(self.hass, self._host, self._port, token)
-                if accs is None:
-                    self._pair_result = "error"
-                    return
                 self._token = token
-                self._accessories = accs
+                self._accessories = accs if accs is not None else []
                 self._pair_result = "approved"
                 return
             if state in ("denied", "expired"):
@@ -304,7 +381,23 @@ class HALockBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # pending
             await asyncio.sleep(PAIR_POLL_INTERVAL)
 
+        # Timed out without approval. Best-effort tell the bridge to drop the
+        # pending request so an abandoned dialog doesn't linger (old bridges may
+        # 404/405 this — ignore any failure).
+        await self._abandon_pair(session, base, request_id)
         self._pair_result = "expired"
+
+    async def _abandon_pair(self, session, base: str, request_id: str) -> None:
+        """Best-effort DELETE of a pending pair request. Tolerant of old bridges
+        that don't implement the endpoint (any error is ignored)."""
+        try:
+            async with session.delete(
+                f"{base}/pair/{request_id}",
+                timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT),
+            ):
+                pass
+        except Exception:  # noqa: BLE001
+            pass
 
     async def async_step_pair_denied(
         self, user_input: dict[str, Any] | None = None

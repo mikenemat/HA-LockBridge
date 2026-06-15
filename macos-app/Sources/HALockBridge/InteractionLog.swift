@@ -57,4 +57,14 @@ final class InteractionLog {
         lock.lock(); defer { lock.unlock() }
         return events.reversed()
     }
+
+    /// The newest `limit` events, most-recent first. History stays unbounded
+    /// in memory; this just caps what gets pushed into the SwiftUI @Published
+    /// list so the per-event copy + SwiftUI diff on the main (HomeKit) thread
+    /// stays O(limit) instead of O(history). The Stats panel only renders a
+    /// scroll region of finite height anyway.
+    func recent(_ limit: Int) -> [Event] {
+        lock.lock(); defer { lock.unlock() }
+        return events.suffix(limit).reversed()
+    }
 }
