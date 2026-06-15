@@ -44,7 +44,7 @@ jobs:
             -x '*/__pycache__/*' '*.pyc' '*/.DS_Store'
 
       - name: Upload as workflow artifact (always, so manual runs are testable)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ha_lockbridge-${{ steps.meta.outputs.version }}
           path: ha_lockbridge-${{ steps.meta.outputs.version }}.zip
