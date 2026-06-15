@@ -766,6 +766,13 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         log("Home added: \(home.name)")
         home.delegate = self
         for accessory in home.accessories { considerAccessory(accessory, in: home) }
+        // The home count may have just crossed the >1 boundary (e.g. a 2nd home
+        // synced in late). The display-home prefix is gated on homes.count > 1
+        // and evaluated per-publish, so re-publish ALL tracked locks — otherwise
+        // the already-published first-home locks keep their bare name while the
+        // new home's locks are prefixed (asymmetric). Display only; identity is
+        // untouched (the prefix never feeds the wire id), so this can't orphan.
+        republishAllTracked(reason: "home-added")
     }
 
     func homeManager(_ manager: HMHomeManager, didRemove home: HMHome) {
@@ -773,9 +780,42 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         for accessory in home.accessories {
             forgetAccessory(accessory.uniqueIdentifier, name: accessory.name)
         }
+        // Count may have dropped back to 1 — re-publish remaining locks so they
+        // shed the now-unwarranted home prefix. (Display only; identity safe.)
+        republishAllTracked(reason: "home-removed")
+    }
+
+    /// Re-run `recomputeAndPublish` for every tracked accessory. Used when the
+    /// HomeKit *home set* changes (added / removed / renamed), because the
+    /// display-home prefix is gated on `homeManager.homes.count > 1` and
+    /// evaluated per-publish — without this, already-published locks keep a
+    /// stale prefix (or stale home name) until unrelated activity happens to
+    /// republish them. Goes through the normal publish path, so the per-accessory
+    /// dedup makes unchanged locks no-ops, and the wire id is resolved by the
+    /// identity cache exactly as before (keyed on the stable HMAccessory UUID /
+    /// serial hash — never the display prefix), so this CANNOT reassign,
+    /// orphan, or duplicate an entity.
+    private func republishAllTracked(reason: String) {
+        for accessory in trackedAccessories.values {
+            recomputeAndPublish(for: accessory, reason: reason)
+        }
     }
 
     // MARK: - HMHomeDelegate
+
+    /// Fires when a HomeKit home is renamed. Refresh the cached home name for
+    /// its accessories and re-publish so the display prefix tracks the rename
+    /// live instead of going stale until an app restart. Within a run the
+    /// identity cache resolves each accessory by its (stable) HMAccessory UUID,
+    /// so updating the home name only refreshes the cache's secondary-index
+    /// metadata and the display field — it never changes a wire id.
+    func homeDidUpdateName(_ home: HMHome) {
+        log("Home renamed: \(home.name)")
+        for accessory in home.accessories {
+            homeNameForAccessory[accessory.uniqueIdentifier] = home.name
+        }
+        republishAllTracked(reason: "home-renamed")
+    }
 
     /// Fires when a new HomeKit accessory is paired into a home AFTER the
     /// bridge has already discovered the home. This is how a fresh ThorBolt

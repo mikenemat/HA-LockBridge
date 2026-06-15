@@ -4,6 +4,25 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.6.6] — 2026-06-15
+
+### Fixed
+- **Home-name prefix stays consistent across multi-home sync lag and home
+  renames.** Follow-up to 0.6.5, from an adversarial QA pass: the `<Home>` prefix
+  is gated on `homes.count > 1`, read per-publish. If iCloud delivered a second
+  HomeKit home *after* the first home's locks were already published, those
+  first-home locks kept their bare (un-prefixed) name while the new home's locks
+  were prefixed — an asymmetric display until unrelated activity republished
+  them. The bridge now re-publishes all tracked locks whenever the home set
+  changes (home added/removed), and refreshes the prefix live on a home rename
+  (new `homeDidUpdateName` delegate). Display-only: re-publishing goes through
+  the normal identity-cache path keyed on the stable accessory UUID / serial
+  hash, so wire ids, HA `unique_id`s, and entities are untouched — verified by
+  the QA repros (no orphan, no duplicate).
+
+### Changed
+- `MARKETING_VERSION` 0.6.5 → 0.6.6, `CURRENT_PROJECT_VERSION` 19 → 20.
+
 ## [0.6.5] — 2026-06-15
 
 ### Added
