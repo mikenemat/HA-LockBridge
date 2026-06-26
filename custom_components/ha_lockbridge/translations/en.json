@@ -29,10 +29,7 @@
       },
       "select_devices": {
         "title": "Select locks to expose",
-        "description": "Found {count} HomeKit lock(s). ThorBolt X1 locks are flagged ✅ Verified and checked by default — this integration is built for them. Check any other locks you'd also like to control from Home Assistant.",
-        "data": {
-          "locks": "Locks"
-        }
+        "description": "Found {count} HomeKit lock(s). Each lock has its own switch below. ThorBolt X1 locks are flagged ✅ Verified and turned on by default — this integration is built for them. Turn on any other locks you'd also like to control from Home Assistant."
       }
     },
     "progress": {
@@ -56,10 +53,7 @@
     "step": {
       "init": {
         "title": "Select locks to expose",
-        "description": "Check the locks you want exposed as Home Assistant entities. ThorBolt X1 locks are flagged ✅ Verified. Unchecking a lock removes its entities on the next reload.",
-        "data": {
-          "locks": "Locks"
-        }
+        "description": "Each lock has its own switch — turn on the ones you want exposed as Home Assistant entities. ThorBolt X1 locks are flagged ✅ Verified. Turning a lock off removes its entities on the next reload."
       }
     },
     "abort": {

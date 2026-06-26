@@ -11,7 +11,7 @@
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/mikenemat/ha-lockbridge/issues",
   "requirements": [],
-  "version": "0.6.2",
+  "version": "0.6.3",
   "zeroconf": [
     {
       "type": "_ha-lockbridge._tcp.local."

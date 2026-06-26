@@ -25,7 +25,6 @@ from homeassistant import config_entries
 from homeassistant.components import zeroconf
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
-from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
@@ -86,13 +85,32 @@ def _lock_options(
     return options, thorbolt_ids
 
 
-def _build_select_schema(
+def _checkbox_fields(
     options: dict[str, str], default_ids: list[str]
-) -> vol.Schema:
-    """One combined multi_select (a flat checkbox list) of every lock."""
-    return vol.Schema(
-        {vol.Required("locks", default=default_ids): cv.multi_select(options)}
-    )
+) -> tuple[vol.Schema, dict[str, str]]:
+    """Build one always-visible toggle per lock, keyed by its display label, plus
+    a {field_key -> accessory_id} map for decoding the submission.
+
+    Why NOT a single `cv.multi_select`: Home Assistant's config-flow multi_select
+    renders as a flat checkbox list only up to ~6 options and COLLAPSES INTO A
+    DROPDOWN above that — which buried every lock. Individual boolean fields
+    render as one labeled row each regardless of how many locks there are, so
+    they all stay listed plainly on the page. The label (with the ✅ ThorBolt X1
+    Verified badge) is used as the field key, since dynamic per-lock fields can't
+    be pre-translated.
+    """
+    default_set = set(default_ids)
+    schema_dict: dict[Any, Any] = {}
+    key_to_id: dict[str, str] = {}
+    for aid, label in options.items():
+        key = label
+        n = 2
+        while key in key_to_id:  # guarantee unique field keys for duplicate labels
+            key = f"{label} ({n})"
+            n += 1
+        key_to_id[key] = aid
+        schema_dict[vol.Optional(key, default=(aid in default_set))] = bool
+    return vol.Schema(schema_dict), key_to_id
 
 
 async def _fetch_accessories(
@@ -426,8 +444,10 @@ class HALockBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         options, thorbolt_ids = _lock_options(self._accessories)
+        # ThorBolts default ON (recommended); other locks are opt-in.
+        schema, key_to_id = _checkbox_fields(options, default_ids=thorbolt_ids)
         if user_input is not None:
-            enabled = list(user_input.get("locks", []))
+            enabled = [key_to_id[k] for k, on in user_input.items() if on and k in key_to_id]
             return self.async_create_entry(
                 title=f"HA-LockBridge ({self._host})",
                 data={
@@ -438,8 +458,6 @@ class HALockBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 options={CONF_ENABLED_IDS: enabled},
             )
 
-        # ThorBolts are pre-checked (recommended); other locks are opt-in.
-        schema = _build_select_schema(options, default_ids=thorbolt_ids)
         return self.async_show_form(
             step_id="select_devices",
             data_schema=schema,
@@ -500,9 +518,9 @@ class HALockBridgeOptionsFlow(config_entries.OptionsFlow):
             enabled_set = set(configured)
             default_ids = [aid for aid in options if aid in enabled_set]
 
+        schema, key_to_id = _checkbox_fields(options, default_ids)
         if user_input is not None:
-            enabled = list(user_input.get("locks", []))
+            enabled = [key_to_id[k] for k, on in user_input.items() if on and k in key_to_id]
             return self.async_create_entry(title="", data={CONF_ENABLED_IDS: enabled})
 
-        schema = _build_select_schema(options, default_ids)
         return self.async_show_form(step_id="init", data_schema=schema)
