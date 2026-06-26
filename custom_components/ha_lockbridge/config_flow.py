@@ -53,45 +53,46 @@ _MANUAL_SCHEMA = vol.Schema(
 )
 
 
-def _partition(accessories: list[dict[str, Any]]) -> tuple[dict[str, str], dict[str, str]]:
-    """Split into (thorbolt, other) dicts of id → name, sorted by name.
+def _lock_options(
+    accessories: list[dict[str, Any]],
+) -> tuple[dict[str, str], list[str]]:
+    """Build a single id → label map for one combined checkbox list, plus the
+    list of ThorBolt ids (the recommended default selection).
 
-    The bridge is responsible for filtering out unhealthy/ghost accessories
-    before we get the list; we just bucket what we're given.
+    ThorBolt X1 locks are NOT split into a separate group/dropdown anymore — they
+    sit in the same checkbox list as every other lock and are flagged inline with
+    a "✅ <model> Verified" badge in the label. (Config-flow labels are plain
+    text, so the ✅ emoji stands in for a green checkmark badge.) The bridge
+    filters out unhealthy/ghost accessories before we get the list.
     """
-    thorbolt: dict[str, str] = {}
-    other: dict[str, str] = {}
-    # Sort by home then name so multi-home setups group together in the picker.
+    options: dict[str, str] = {}
+    thorbolt_ids: list[str] = []
+    # Sort by home then name so multi-home setups group together in the list.
     for acc in sorted(
         accessories, key=lambda a: ((a.get("home") or ""), (a.get("name") or "").lower())
     ):
-        bucket = thorbolt if acc.get("manufacturer") == THORBOLT_MANUFACTURER else other
         base = acc.get("name") or acc["id"]
         home = acc.get("home")
         label = f"{home} {base}" if home else base
-        model = acc.get("model")
-        if model:
-            label = f"{label}  ({model})"
-        bucket[acc["id"]] = label
-    return thorbolt, other
+        if acc.get("manufacturer") == THORBOLT_MANUFACTURER:
+            thorbolt_ids.append(acc["id"])
+            model = acc.get("model") or "ThorBolt X1"
+            label = f"{label}  ✅ {model} Verified"
+        else:
+            model = acc.get("model")
+            if model:
+                label = f"{label}  ({model})"
+        options[acc["id"]] = label
+    return options, thorbolt_ids
 
 
 def _build_select_schema(
-    thorbolt: dict[str, str],
-    other: dict[str, str],
-    thorbolt_default: list[str],
-    other_default: list[str],
+    options: dict[str, str], default_ids: list[str]
 ) -> vol.Schema:
-    schema_dict: dict[Any, Any] = {}
-    if thorbolt:
-        schema_dict[
-            vol.Required("thorbolt", default=thorbolt_default)
-        ] = cv.multi_select(thorbolt)
-    if other:
-        schema_dict[
-            vol.Optional("other", default=other_default)
-        ] = cv.multi_select(other)
-    return vol.Schema(schema_dict)
+    """One combined multi_select (a flat checkbox list) of every lock."""
+    return vol.Schema(
+        {vol.Required("locks", default=default_ids): cv.multi_select(options)}
+    )
 
 
 async def _fetch_accessories(
@@ -424,9 +425,9 @@ class HALockBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_select_devices(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        thorbolt, other = _partition(self._accessories)
+        options, thorbolt_ids = _lock_options(self._accessories)
         if user_input is not None:
-            enabled = list(user_input.get("thorbolt", [])) + list(user_input.get("other", []))
+            enabled = list(user_input.get("locks", []))
             return self.async_create_entry(
                 title=f"HA-LockBridge ({self._host})",
                 data={
@@ -437,18 +438,14 @@ class HALockBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 options={CONF_ENABLED_IDS: enabled},
             )
 
-        schema = _build_select_schema(
-            thorbolt=thorbolt,
-            other=other,
-            thorbolt_default=list(thorbolt.keys()),
-            other_default=[],
-        )
+        # ThorBolts are pre-checked (recommended); other locks are opt-in.
+        schema = _build_select_schema(options, default_ids=thorbolt_ids)
         return self.async_show_form(
             step_id="select_devices",
             data_schema=schema,
             description_placeholders={
-                "thorbolt_count": str(len(thorbolt)),
-                "other_count": str(len(other)),
+                "count": str(len(options)),
+                "thorbolt_count": str(len(thorbolt_ids)),
             },
         )
 
@@ -491,19 +488,21 @@ class HALockBridgeOptionsFlow(config_entries.OptionsFlow):
             if accessories is None:
                 return self.async_abort(reason="cannot_connect")
 
-        thorbolt, other = _partition(accessories)
-        currently_enabled = set(self.entry.options.get(CONF_ENABLED_IDS, []))
+        options, _thorbolt_ids = _lock_options(accessories)
 
-        if not self.entry.options.get(CONF_ENABLED_IDS):
-            thorbolt_default = list(thorbolt.keys())
-            other_default = list(other.keys())
+        # Distinguish "never configured" (None → a pre-options entry that exposed
+        # everything, so default all checked) from an explicit empty selection
+        # ([] → the user chose none, so default nothing checked).
+        configured = self.entry.options.get(CONF_ENABLED_IDS)
+        if configured is None:
+            default_ids = list(options.keys())
         else:
-            thorbolt_default = [aid for aid in thorbolt if aid in currently_enabled]
-            other_default = [aid for aid in other if aid in currently_enabled]
+            enabled_set = set(configured)
+            default_ids = [aid for aid in options if aid in enabled_set]
 
         if user_input is not None:
-            enabled = list(user_input.get("thorbolt", [])) + list(user_input.get("other", []))
+            enabled = list(user_input.get("locks", []))
             return self.async_create_entry(title="", data={CONF_ENABLED_IDS: enabled})
 
-        schema = _build_select_schema(thorbolt, other, thorbolt_default, other_default)
+        schema = _build_select_schema(options, default_ids)
         return self.async_show_form(step_id="init", data_schema=schema)

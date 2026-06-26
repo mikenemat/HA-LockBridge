@@ -67,13 +67,13 @@ THORBOLT_MANUFACTURER = _load_const("THORBOLT_MANUFACTURER")
 CONF_ENABLED_IDS = _load_const("CONF_ENABLED_IDS")
 
 
-def _partition_fn() -> Callable[[list[dict[str, Any]]], tuple]:
+def _lock_options_fn() -> Callable[[list[dict[str, Any]]], tuple]:
     ns: dict[str, Any] = {
         "Any": Any,
         "THORBOLT_MANUFACTURER": THORBOLT_MANUFACTURER,
     }
-    _extract_funcs(INTEGRATION / "config_flow.py", {"_partition"}, ns)
-    return ns["_partition"]
+    _extract_funcs(INTEGRATION / "config_flow.py", {"_lock_options"}, ns)
+    return ns["_lock_options"]
 
 
 def _entity_helpers() -> dict[str, Callable]:
@@ -104,51 +104,78 @@ class _FakeClient:
 
 
 # --------------------------------------------------------------------------- #
-# _partition
+# _lock_options — single combined list + ThorBolt "Verified" badge
 # --------------------------------------------------------------------------- #
 
 
-def test_partition_buckets_thorbolt_vs_other():
-    partition = _partition_fn()
+def test_lock_options_one_combined_map_with_thorbolt_ids():
+    lock_options = _lock_options_fn()
     accs = [
         {"id": "a", "name": "Front Door", "manufacturer": THORBOLT_MANUFACTURER},
         {"id": "b", "name": "Garage", "manufacturer": "Acme Locks"},
     ]
-    thorbolt, other = partition(accs)
-    assert list(thorbolt.keys()) == ["a"]
-    assert list(other.keys()) == ["b"]
+    options, thorbolt_ids = lock_options(accs)
+    # Both locks live in ONE map (no separate group), keyed by id.
+    assert set(options.keys()) == {"a", "b"}
+    assert thorbolt_ids == ["a"]
 
 
-def test_partition_sorts_by_name_case_insensitive():
-    partition = _partition_fn()
+def test_lock_options_thorbolt_gets_verified_badge():
+    lock_options = _lock_options_fn()
+    accs = [
+        {"id": "a", "name": "Front Door", "manufacturer": THORBOLT_MANUFACTURER,
+         "model": "ThorBolt X1"},
+        {"id": "b", "name": "Garage", "manufacturer": "Acme Locks", "model": "M1"},
+    ]
+    options, _ = lock_options(accs)
+    assert "✅" in options["a"] and "ThorBolt X1 Verified" in options["a"]
+    assert options["a"].startswith("Front Door")
+    # Non-ThorBolt locks get no badge, just the model in parens.
+    assert "✅" not in options["b"]
+    assert options["b"] == "Garage  (M1)"
+
+
+def test_lock_options_thorbolt_badge_falls_back_when_model_missing():
+    lock_options = _lock_options_fn()
+    accs = [{"id": "a", "name": "Door", "manufacturer": THORBOLT_MANUFACTURER}]
+    options, _ = lock_options(accs)
+    assert options["a"] == "Door  ✅ ThorBolt X1 Verified"
+
+
+def test_lock_options_sorts_by_name_case_insensitive():
+    lock_options = _lock_options_fn()
     accs = [
         {"id": "1", "name": "zeta", "manufacturer": "Acme"},
         {"id": "2", "name": "Alpha", "manufacturer": "Acme"},
         {"id": "3", "name": "beta", "manufacturer": "Acme"},
     ]
-    _, other = partition(accs)
-    assert list(other.keys()) == ["2", "3", "1"]  # Alpha, beta, zeta
+    options, _ = lock_options(accs)
+    assert list(options.keys()) == ["2", "3", "1"]  # Alpha, beta, zeta
 
 
-def test_partition_label_includes_model_when_present():
-    partition = _partition_fn()
-    accs = [{"id": "x", "name": "Door", "manufacturer": "Acme", "model": "M1"}]
-    _, other = partition(accs)
-    assert other["x"] == "Door  (M1)"
+def test_lock_options_sorts_by_home_then_name():
+    lock_options = _lock_options_fn()
+    accs = [
+        {"id": "1", "name": "Front Door", "home": "Beach", "manufacturer": "Acme"},
+        {"id": "2", "name": "Front Door", "home": "Main", "manufacturer": "Acme"},
+    ]
+    options, _ = lock_options(accs)
+    assert list(options.keys()) == ["1", "2"]  # Beach before Main
+    assert options["1"] == "Beach Front Door"
+    assert options["2"] == "Main Front Door"
 
 
-def test_partition_falls_back_to_id_when_name_missing():
-    partition = _partition_fn()
+def test_lock_options_falls_back_to_id_when_name_missing():
+    lock_options = _lock_options_fn()
     accs = [{"id": "abc123", "manufacturer": "Acme"}]
-    _, other = partition(accs)
-    # No name -> label is the id; sorts as empty-string name.
-    assert other["abc123"] == "abc123"
+    options, _ = lock_options(accs)
+    assert options["abc123"] == "abc123"
 
 
-def test_partition_empty_input():
-    partition = _partition_fn()
-    thorbolt, other = partition([])
-    assert thorbolt == {} and other == {}
+def test_lock_options_empty_input():
+    lock_options = _lock_options_fn()
+    options, thorbolt_ids = lock_options([])
+    assert options == {} and thorbolt_ids == []
 
 
 # --------------------------------------------------------------------------- #
