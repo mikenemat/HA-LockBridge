@@ -67,8 +67,20 @@ def _lock_options(
     options: dict[str, str] = {}
     thorbolt_ids: list[str] = []
     # Sort by home then name so multi-home setups group together in the list.
+    # The stable id is the final tiebreaker so ordering is a pure function of the
+    # accessory SET, not the order the bridge happens to return them in: the
+    # options flow re-fetches /accessories between the render and submit passes,
+    # and without an id tiebreaker two byte-identical labels would tie on
+    # (home, name) and fall back to the bridge's array order — which can differ
+    # across the two fetches and would then mis-map which toggle controls which
+    # lock once the duplicate-label "(n)" suffix is applied below.
     for acc in sorted(
-        accessories, key=lambda a: ((a.get("home") or ""), (a.get("name") or "").lower())
+        accessories,
+        key=lambda a: (
+            (a.get("home") or ""),
+            (a.get("name") or "").lower(),
+            a.get("id") or "",
+        ),
     ):
         base = acc.get("name") or acc["id"]
         home = acc.get("home")

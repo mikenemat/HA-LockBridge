@@ -76,6 +76,38 @@ def _lock_options_fn() -> Callable[[list[dict[str, Any]]], tuple]:
     return ns["_lock_options"]
 
 
+def _checkbox_fields_fn() -> Callable:
+    """Extract `_checkbox_fields` with a minimal voluptuous stub.
+
+    The real helper only uses `vol.Optional(key, default=...)` as a hashable
+    schema marker and `vol.Schema(dict)`. We stub both so the actual shipped body
+    runs on a bare interpreter and we can assert on the {field_key -> id} map and
+    the per-field defaults — the parts that drive the picker's correctness.
+    """
+
+    class _Optional:
+        def __init__(self, key: Any, default: Any = None) -> None:
+            self.key = key
+            self.default = default
+
+        def __hash__(self) -> int:
+            return hash(self.key)
+
+        def __eq__(self, other: Any) -> bool:
+            return isinstance(other, _Optional) and other.key == self.key
+
+    class _Vol:
+        Optional = _Optional
+
+        @staticmethod
+        def Schema(d: dict) -> dict:
+            return d  # return the field dict so tests can inspect markers/defaults
+
+    ns: dict[str, Any] = {"Any": Any, "vol": _Vol}
+    _extract_funcs(INTEGRATION / "config_flow.py", {"_checkbox_fields"}, ns)
+    return ns["_checkbox_fields"]
+
+
 def _entity_helpers() -> dict[str, Callable]:
     ns: dict[str, Any] = {
         "Any": Any,
@@ -176,6 +208,63 @@ def test_lock_options_empty_input():
     lock_options = _lock_options_fn()
     options, thorbolt_ids = lock_options([])
     assert options == {} and thorbolt_ids == []
+
+
+# --------------------------------------------------------------------------- #
+# _checkbox_fields — per-lock toggles, dedup, and cross-refetch stability
+# --------------------------------------------------------------------------- #
+
+
+def test_lock_options_order_is_stable_for_identical_labels():
+    """Byte-identical labels must order deterministically by id, not by input
+    order — the options flow re-fetches /accessories between render and submit,
+    so a bridge reorder must NOT change the ordering (which drives the dedup
+    suffix)."""
+    lock_options = _lock_options_fn()
+    a = {"id": "id_zzz", "name": "Front Door", "home": "H",
+         "manufacturer": "Acme", "model": "M1"}
+    b = {"id": "id_aaa", "name": "Front Door", "home": "H",
+         "manufacturer": "Acme", "model": "M1"}
+    opts_fwd, _ = lock_options([a, b])
+    opts_rev, _ = lock_options([b, a])  # bridge returned them reordered
+    assert list(opts_fwd.keys()) == ["id_aaa", "id_zzz"]  # id tiebreaker
+    assert opts_fwd == opts_rev
+
+
+def test_checkbox_fields_dedup_and_defaults():
+    checkbox_fields = _checkbox_fields_fn()
+    options = {  # two distinct ids that share one display label
+        "id_aaa": "H Front Door  (M1)",
+        "id_zzz": "H Front Door  (M1)",
+    }
+    schema, key_to_id = checkbox_fields(options, default_ids=["id_aaa"])
+    # Two DISTINCT field keys, each mapping back to the correct id.
+    assert key_to_id == {
+        "H Front Door  (M1)": "id_aaa",
+        "H Front Door  (M1) (2)": "id_zzz",
+    }
+    # Only the default-on id's toggle defaults True.
+    defaults = {opt.key: opt.default for opt in schema}
+    assert defaults["H Front Door  (M1)"] is True
+    assert defaults["H Front Door  (M1) (2)"] is False
+
+
+def test_picker_keymap_is_stable_across_refetch():
+    """End-to-end guard for the options-flow re-fetch hazard: the field-key -> id
+    map built from /accessories in two different orders must be IDENTICAL, so a
+    toggle posted on the render pass decodes to the same lock on the submit pass
+    even for byte-identical labels."""
+    lock_options = _lock_options_fn()
+    checkbox_fields = _checkbox_fields_fn()
+    a = {"id": "id_zzz", "name": "Front Door", "home": "H",
+         "manufacturer": "Acme", "model": "M1"}
+    b = {"id": "id_aaa", "name": "Front Door", "home": "H",
+         "manufacturer": "Acme", "model": "M1"}
+    opts1, _ = lock_options([a, b])
+    opts2, _ = lock_options([b, a])
+    _, map1 = checkbox_fields(opts1, default_ids=[])
+    _, map2 = checkbox_fields(opts2, default_ids=[])
+    assert map1 == map2  # identical -> no cross-pass mis-mapping
 
 
 # --------------------------------------------------------------------------- #
