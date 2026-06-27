@@ -440,6 +440,11 @@ struct StatusView: View {
                     .orange,
                     "focus grab failed — write may stall",
                     "")
+        case .slowConfirm(let action, let durationMs):
+            return ("tortoise",
+                    .orange,
+                    "slow \(action) — succeeded but took a while",
+                    formatDurationMs(durationMs))
         }
     }
 

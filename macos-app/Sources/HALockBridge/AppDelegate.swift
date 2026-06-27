@@ -232,7 +232,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                 }
             )
 
-            let s = BridgeServer(monitor: monitor, store: store, pairingManager: pairing, interactionLog: interactionLog, logger: log)
+            let s = BridgeServer(monitor: monitor, store: store, pairingManager: pairing, interactionLog: interactionLog, lockEventLog: lockEventLog, logger: log)
             s.onConnectionsChanged = { [weak viewModel] ips in
                 Task { @MainActor in
                     viewModel?.connectedClients = ips

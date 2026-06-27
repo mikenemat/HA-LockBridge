@@ -208,6 +208,15 @@ a HA restart in some cases.
   alive.
 - `curl http://<bridge-host>:8765/info` — no auth, returns `instance_id` so
   you can verify HA is talking to the right bridge.
+- `curl -H "Authorization: Bearer <token>" http://<bridge-host>:8765/debug/events`
+  — **auth required**; returns the in-memory lock-health history (write
+  retries, `slow_confirm`/`unconfirmed` writes, unreachable gaps) as JSON. The
+  only way to inspect the "Lock Errors/Warnings" Stats history off the bridge's
+  own screen (the log is in-memory, wiped on app restart). The token is a key
+  of `paired_clients` in the sandbox-container `config.json`. Note: bridge
+  `print`/stderr output is **discarded** for the App Store GUI build (not in
+  `/tmp`, `~/Library/Logs`, or the unified log), so `/debug/events` is the
+  primary remote diagnostic for lock-write behavior.
 - `log stream --predicate 'process == "HA-LockBridge"'` — live bridge logs
   via the unified macOS log system (if the bridge uses `os_log`, which it
   currently does NOT — bridge logs go to stderr).

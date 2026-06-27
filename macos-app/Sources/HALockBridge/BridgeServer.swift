@@ -18,6 +18,11 @@ final class BridgeServer {
     private let store: TokenStore
     private let pairingManager: PairingManager
     private let interactionLog: InteractionLog
+    /// Lock-health event history (write retries, unconfirmed/slow writes,
+    /// unreachable gaps). Read-only, surfaced via `GET /debug/events` so the
+    /// in-memory Stats history can be inspected remotely (it's otherwise only
+    /// visible on the bridge's own screen). Optional so CLI/test paths no-op.
+    private let lockEventLog: LockEventLog?
     private let logger: (String) -> Void
     private let group: EventLoopGroup
     private var channel: Channel?
@@ -31,12 +36,14 @@ final class BridgeServer {
         store: TokenStore,
         pairingManager: PairingManager,
         interactionLog: InteractionLog,
+        lockEventLog: LockEventLog? = nil,
         logger: @escaping (String) -> Void
     ) {
         self.monitor = monitor
         self.store = store
         self.pairingManager = pairingManager
         self.interactionLog = interactionLog
+        self.lockEventLog = lockEventLog
         self.logger = logger
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
     }
@@ -68,6 +75,7 @@ final class BridgeServer {
         let store = self.store
         let pairing = self.pairingManager
         let interactionLog = self.interactionLog
+        let lockEventLog = self.lockEventLog
         let registerWS: (WSConnection) -> Void = { [weak self] conn in self?.registerWS(conn) }
         let unregisterWS: (WSConnection) -> Void = { [weak self] conn in self?.unregisterWS(conn) }
         let serverLogger = self.logger
@@ -81,6 +89,7 @@ final class BridgeServer {
                     store: store,
                     pairing: pairing,
                     interactionLog: interactionLog,
+                    lockEventLog: lockEventLog,
                     logger: serverLogger
                 )
 
@@ -517,17 +526,19 @@ final class HTTPRequestHandler: ChannelInboundHandler, RemovableChannelHandler, 
     private let store: TokenStore
     private let pairing: PairingManager
     private let interactionLog: InteractionLog
+    private let lockEventLog: LockEventLog?
     private let logger: (String) -> Void
 
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer: ByteBuffer?
     private static let maxBodyBytes = 1 << 20
 
-    init(monitor: HomeKitMonitor, store: TokenStore, pairing: PairingManager, interactionLog: InteractionLog, logger: @escaping (String) -> Void) {
+    init(monitor: HomeKitMonitor, store: TokenStore, pairing: PairingManager, interactionLog: InteractionLog, lockEventLog: LockEventLog? = nil, logger: @escaping (String) -> Void) {
         self.monitor = monitor
         self.store = store
         self.pairing = pairing
         self.interactionLog = interactionLog
+        self.lockEventLog = lockEventLog
         self.logger = logger
     }
 
@@ -638,6 +649,20 @@ final class HTTPRequestHandler: ChannelInboundHandler, RemovableChannelHandler, 
                 ]
                 context.eventLoop.execute {
                     self.respondJSON(context: context, status: .ok, body: payload)
+                }
+            }
+            return
+        }
+
+        // GET /debug/events — recent lock-health events (write retries,
+        // unconfirmed/slow writes, unreachable gaps). Read-only diagnostics;
+        // the history is in-memory on the bridge and otherwise only visible on
+        // its own screen. Additive endpoint (no api/protocol bump).
+        if head.method == .GET, path == "/debug/events" {
+            DispatchQueue.main.async {
+                let events = self.lockEventLog?.all().map { $0.jsonObject } ?? []
+                context.eventLoop.execute {
+                    self.respondJSON(context: context, status: .ok, body: ["events": events])
                 }
             }
             return

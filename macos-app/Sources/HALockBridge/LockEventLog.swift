@@ -72,6 +72,11 @@ final class LockEventLog {
         /// still not `.active` afterwards — HomeKit may stall the write. A
         /// diagnostic for the appliance-mode focus invariant.
         case focusGrabFailed
+        /// A command that DID confirm (current reached target) but took longer
+        /// than the slow-confirm threshold to do so. Informational — the
+        /// command succeeded — but surfaces a sluggish lock that responds
+        /// within budget yet slowly. `durationMs` is command → confirmation.
+        case slowConfirm(targetAction: String, durationMs: Int)
     }
 
     struct Event: Identifiable, Equatable {
@@ -87,6 +92,38 @@ final class LockEventLog {
         /// Mutable so the retry loop / reachability delegate can close
         /// or update the event in place without rewriting the buffer.
         var kind: Kind
+
+        /// JSON dict for the `GET /debug/events` diagnostics endpoint.
+        var jsonObject: [String: Any] {
+            var obj: [String: Any] = [
+                "id": id.uuidString,
+                "accessory_name": accessoryName,
+                "accessory_id": accessoryID,
+                "t": timestamp.timeIntervalSince1970,
+            ]
+            switch kind {
+            case .writeRetry(let action, let attempts, let durationMs, let outcome):
+                obj["kind"] = "write_retry"
+                obj["action"] = action
+                obj["attempts"] = attempts
+                obj["duration_ms"] = durationMs
+                obj["outcome"] = outcome.rawValue
+            case .unreachableGap(let durationSec):
+                obj["kind"] = "unreachable_gap"
+                if let d = durationSec { obj["duration_sec"] = d } else { obj["ongoing"] = true }
+            case .writeFailed(let action, let detail):
+                obj["kind"] = "write_failed"
+                obj["action"] = action
+                obj["detail"] = detail
+            case .focusGrabFailed:
+                obj["kind"] = "focus_grab_failed"
+            case .slowConfirm(let action, let durationMs):
+                obj["kind"] = "slow_confirm"
+                obj["action"] = action
+                obj["duration_ms"] = durationMs
+            }
+            return obj
+        }
     }
 
     private let lock = NSLock()

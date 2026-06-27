@@ -78,6 +78,14 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     /// write-stall (now fixed by appliance mode), so 30s is sufficient.
     private static let writeBudgetSeconds: TimeInterval = 30
 
+    /// A command that DOES confirm (current reaches target) but takes longer
+    /// than this is logged as a `.slowConfirm` warning even though it
+    /// succeeded — visibility into a lock that responds but sluggishly. Lower
+    /// than `writeBudgetSeconds` (the hang/revert threshold) so a
+    /// slow-but-successful write (the common case for a flaky lock) is
+    /// surfaced instead of silently passing. 15s per the maintainer.
+    private static let slowConfirmThresholdSeconds: TimeInterval = 15
+
     typealias StateObserver = (AccessoryState) -> Void
     typealias RemovalObserver = (UUID) -> Void
     /// (wireID, target "secured"|"unsecured", reason "budget_exhausted"|"error", accessoryName)
@@ -729,6 +737,8 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             log("Lock \(accessory.name): confirmed at deadline (current=\(pending.target))")
             pending.completed = true
             pendingWrites.removeValue(forKey: hmID)
+            recordSlowConfirmIfNeeded(target: pending.target, startedAt: pending.startedAt,
+                                      hadRetryEvent: pending.retryLogEventID != nil, accessory: accessory)
             closeWriteRetryEvent(pending: pending, outcome: pending.acked ? .succeeded : .satisfiedExternally)
             recomputeAndPublish(for: accessory, reason: "deadline-confirmed")
             notifyIfAllWritesSettled()
@@ -786,6 +796,27 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
                               durationMs: elapsedMs, outcome: .unconfirmed)
         ))
         return newID
+    }
+
+    /// Record a `.slowConfirm` warning if a command confirmed (current reached
+    /// target) but took longer than the slow threshold. Skipped when a
+    /// writeRetry event already exists (an 82 write whose own event shows the
+    /// delay) to avoid double-logging; the `>writeBudgetSeconds` hang case is
+    /// likewise covered by its own `.unconfirmed`→`.succeeded` row, so this
+    /// fires for the in-budget-but-slow (≈15–30s) confirmations that would
+    /// otherwise leave no trace.
+    private func recordSlowConfirmIfNeeded(target: Int, startedAt: Date, hadRetryEvent: Bool, accessory: HMAccessory) {
+        guard !hadRetryEvent, let log = lockEventLog else { return }
+        let elapsed = Date().timeIntervalSince(startedAt)
+        guard elapsed >= Self.slowConfirmThresholdSeconds else { return }
+        log.record(.init(
+            id: UUID(),
+            accessoryName: accessory.name,
+            accessoryID: accessory.uniqueIdentifier.uuidString,
+            timestamp: startedAt,
+            kind: .slowConfirm(targetAction: target == 1 ? "lock" : "unlock",
+                               durationMs: Int(elapsed * 1000))
+        ))
     }
 
     /// A hung (`.unconfirmed`) write was confirmed late — the lock finally
@@ -1526,6 +1557,8 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             log("Lock \(accessory.name): pending write target=\(pending.target) confirmed (\(outcome.rawValue)); cancelling background retry")
             pending.completed = true
             pendingWrites.removeValue(forKey: id)
+            recordSlowConfirmIfNeeded(target: pending.target, startedAt: pending.startedAt,
+                                      hadRetryEvent: pending.retryLogEventID != nil, accessory: accessory)
             closeWriteRetryEvent(pending: pending, outcome: outcome)
             notifyIfAllWritesSettled()
             // Clearing the transition window lets deriveLifecycle return

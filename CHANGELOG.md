@@ -4,6 +4,25 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.6.8] — 2026-06-26
+
+### Added
+- **"Slow command" warnings.** A lock command that *does* confirm (the bolt
+  reaches the target) but takes longer than **15s** to do so is now logged as a
+  `slow_confirm` row in the Stats "Lock Errors/Warnings" list ("slow lock —
+  succeeded but took a while", with the duration). The previous 0.6.7 logic only
+  surfaced a command that blew the full 30s budget (the hang/`unconfirmed`
+  path); a lock that responded sluggishly but within budget (the common case for
+  a flaky lock) left no trace. The 15s threshold is separate from, and lower
+  than, the 30s hang/revert budget.
+- **`GET /debug/events` endpoint** (authenticated, additive — no `api` bump):
+  returns the bridge's in-memory lock-health history (write retries,
+  slow/unconfirmed writes, unreachable gaps) as JSON, so it can be inspected
+  remotely instead of only on the bridge's own screen.
+
+### Changed
+- `MARKETING_VERSION` 0.6.7 → 0.6.8, `CURRENT_PROJECT_VERSION` 21 → 22.
+
 ## [0.6.7] — 2026-06-26
 
 ### Changed
