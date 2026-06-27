@@ -411,6 +411,11 @@ struct StatusView: View {
                         .secondary,
                         "delayed \(action) — satisfied externally",
                         durStr)
+            case .unconfirmed:
+                return ("clock.badge.exclamationmark",
+                        .red,
+                        "\(action) not confirmed — lock didn't respond (HA still showing in-progress)",
+                        durStr)
             }
         case .unreachableGap(let durationSec):
             if let d = durationSec {

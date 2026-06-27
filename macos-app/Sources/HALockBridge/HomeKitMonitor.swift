@@ -37,6 +37,11 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         let startedAt: Date
         var completed: Bool = false
         var triggered: Bool = false
+        /// Set once homed has accepted the write (the writeValue completion
+        /// returned no error). We then stop hammering writeValue and just
+        /// wait for the lock to CONFIRM (current_state == target) or for the
+        /// deadline to flag it `.unconfirmed`.
+        var acked: Bool = false
         var attempt: Int = 0
         /// LockEventLog event ID for this command's retry record.
         /// Nil until the first HMError 82 fires — successful first-try
@@ -53,23 +58,25 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     }
 
     /// Backoff schedule for the background write retry loop. After exhausting
-    /// the array we cap at the last value. Cumulative with the cap:
-    /// 1+2+4+8+16×5 ≈ 95s of retry potential, sized to fit inside the 90s
-    /// deadline below with a small slack margin. A reachability-recovery
-    /// callback can fire the next retry immediately, ignoring the scheduled
-    /// delay — so on the fast-recovery path the schedule is irrelevant.
+    /// the array we cap at the last value. Cumulative 1+2+4+8+16 ≈ 31s of
+    /// retry potential, sized to fit the 30s deadline below. A
+    /// reachability-recovery callback can fire the next retry immediately,
+    /// ignoring the scheduled delay — so on the fast-recovery path the
+    /// schedule is irrelevant.
     private static let writeBackoffDelays: [Double] = [1.0, 2.0, 4.0, 8.0, 16.0]
-    /// Background retry budget. Matched to the `transitionWindow` in
-    /// `deriveLifecycle` so HA's UI shows "locking"/"unlocking" for the
-    /// entire retry window without prematurely settling.
+    /// Background write budget. Matched to the `transitionWindow` in
+    /// `deriveLifecycle`. Standardized to 30s in 0.6.7 (was 90s).
     ///
-    /// Bumped 30s → 90s in 0.5.6 after real-world testing showed locks
-    /// commonly take 30–60s to wake from deep sleep when prodded by
-    /// homed; the previous 30s budget was reverting commands that
-    /// would have succeeded at ~45s. 90s covers nearly all observed
-    /// wake-up paths while still capping unbounded delays for the
-    /// genuinely unreachable case.
-    private static let writeBudgetSeconds: TimeInterval = 90
+    /// Two things happen at this deadline if the lock hasn't CONFIRMED the
+    /// new state (current_state == target):
+    ///   - lock still REACHABLE → we record an `.unconfirmed` warning and
+    ///     LEAVE HA showing locking/unlocking (a deliberate "it didn't
+    ///     respond" hang), until it confirms / is superseded / changes.
+    ///   - lock UNREACHABLE → we revert (HA already shows it unavailable).
+    /// The earlier 90s value was sized for slow deep-sleep wake-ups; per
+    /// the maintainer those delays were really the pre-0.6.0 foreground
+    /// write-stall (now fixed by appliance mode), so 30s is sufficient.
+    private static let writeBudgetSeconds: TimeInterval = 30
 
     typealias StateObserver = (AccessoryState) -> Void
     typealias RemovalObserver = (UUID) -> Void
@@ -221,6 +228,34 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     /// any prior pending write for the same accessory.
     private var pendingWrites: [UUID: PendingWrite] = [:]
 
+    /// A write that hit its 30s budget while the lock was REACHABLE but
+    /// never confirmed (current_state never reached target). Moved here out
+    /// of `pendingWrites` so focus is released and retries stop, but the
+    /// accessory is still considered "in transition" — `hasOutstandingWrite`
+    /// keeps `deriveLifecycle` showing locking/unlocking (the HA "hang")
+    /// until the lock confirms, is superseded, or is retargeted externally.
+    /// Keyed by HMAccessory UUID. See `resolveWriteAtDeadline`.
+    private struct HangingWrite {
+        let target: Int
+        let startedAt: Date
+        /// The `.unconfirmed` LockEventLog event, so a late confirmation can
+        /// flip it to `.succeeded`.
+        let eventID: UUID?
+        /// Genuine last-known-good state from before the (now hung) command,
+        /// carried so a superseding command can still revert to reality
+        /// rather than to the phantom "locking"/"unlocking" optimistic state.
+        let priorState: AccessoryState?
+    }
+    private var hangingWrites: [UUID: HangingWrite] = [:]
+
+    /// True while a command we issued is still outstanding for `id` — either
+    /// actively pending (within budget) or hanging unconfirmed past it. While
+    /// true, `recomputeAndPublish` feeds `deriveLifecycle` an infinite
+    /// transition window so HA keeps showing the in-progress state.
+    private func hasOutstandingWrite(_ id: UUID) -> Bool {
+        return pendingWrites[id] != nil || hangingWrites[id] != nil
+    }
+
     /// Callbacks waiting for an accessory's reachability to flip back to
     /// `true`. Fired and drained by `accessoryDidUpdateReachability` when
     /// the accessory becomes reachable. Used by the background write retry
@@ -354,9 +389,13 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     /// `lifecycle_state = "locking"/"unlocking"` instantly. A background
     /// retry loop then writes to HomeKit with up to a 30-second budget,
     /// recovering from transient `HMError 82 (not reachable)` responses
-    /// when the HomeKit hub re-establishes contact with the lock. On
-    /// success the real `current_state` update arrives via the observer
-    /// pipeline; on exhaustion the optimistic state is silently reverted.
+    /// when the HomeKit hub re-establishes contact with the lock. The write
+    /// is only "done" once the lock CONFIRMS it (current_state == target),
+    /// which arrives via the observer pipeline. At the budget without a
+    /// confirmation, `resolveWriteAtDeadline` decides: a still-REACHABLE lock
+    /// is left showing locking/unlocking (an `.unconfirmed` "hang" so HA and
+    /// the Stats page surface that it didn't respond); an UNREACHABLE lock is
+    /// reverted (HA already shows it unavailable).
     ///
     /// The only synchronous failure modes returned through completion are
     /// `.notFound` (no matching tracked accessory) and `.homekitError`
@@ -403,6 +442,12 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             existing.completed = true
             carriedPriorState = existing.priorState
             pendingWrites.removeValue(forKey: hmID)
+        }
+        // A previously-hung (unconfirmed) write is also superseded by this new
+        // command — drop the hang marker and carry its genuine prior forward.
+        if let hung = hangingWrites.removeValue(forKey: hmID) {
+            log("Lock \(accessory.name): superseding prior UNCONFIRMED write (target=\(hung.target)) with new target=\(target)")
+            if carriedPriorState == nil { carriedPriorState = hung.priorState }
         }
 
         // Capture the pre-optimistic-update state for potential revert. Prefer
@@ -465,7 +510,7 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.writeBudgetSeconds) { [weak self] in
             guard let self = self, let still = self.pendingWrites[hmID], still === pending, !still.completed else { return }
             self.log("Lock \(accessory.name): write budget (\(Int(Self.writeBudgetSeconds))s) elapsed via safety timer")
-            self.revertPending(hmID: hmID, accessory: accessory, pending: still)
+            self.resolveWriteAtDeadline(hmID: hmID, accessory: accessory, pending: still)
         }
 
         attemptBackgroundWrite(targetChar: targetChar, accessory: accessory, hmID: hmID, pending: pending)
@@ -501,8 +546,8 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
                     return
                 }
                 if Date() >= pending.deadline {
-                    self.log("Lock \(accessory.name): background write budget exhausted after \(thisAttempt) attempt(s); reverting")
-                    self.revertPending(hmID: hmID, accessory: accessory, pending: pending)
+                    self.log("Lock \(accessory.name): background write budget exhausted after \(thisAttempt) attempt(s)")
+                    self.resolveWriteAtDeadline(hmID: hmID, accessory: accessory, pending: pending)
                     return
                 }
                 let delayIdx = min(thisAttempt - 1, Self.writeBackoffDelays.count - 1)
@@ -540,23 +585,22 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
                 return
             }
 
-            // Success. Refresh the transition window so HA's UI shows
-            // "locking"/"unlocking" until current_state physically matches
-            // target, then re-publish from live HMCharacteristic so any
-            // characteristic updates that landed during the retry are
-            // reflected. (The optimistic state already has target=target,
-            // so dedup will typically skip the broadcast unless other
-            // fields changed.)
-            self.log("Lock \(accessory.name): background write accepted on attempt \(thisAttempt)")
-            pending.completed = true
-            self.pendingWrites.removeValue(forKey: hmID)
+            // homed ACCEPTED the write — but "accepted" is not "the bolt
+            // moved." Do NOT treat this as done: keep the pending write and
+            // wait for the lock to CONFIRM (current_state == target). Stop
+            // hammering writeValue (mark acked; the retry loop only reschedules
+            // on the 82 path, so simply returning here halts retries). Refresh
+            // the transition window and re-publish so HA shows
+            // locking/unlocking until confirmation arrives — via the
+            // characteristic-update path (recomputeAndPublish's confirmation
+            // block) or the deadline, which flags it `.unconfirmed` and leaves
+            // HA hanging. If current_state already equals target (e.g. locking
+            // an already-locked lock, or a fast actuation that already
+            // reported), that same recompute settles it immediately.
+            self.log("Lock \(accessory.name): background write accepted on attempt \(thisAttempt); awaiting confirmation")
+            pending.acked = true
             self.lastTargetChange[hmID] = Date()
-            // Close any open writeRetry event for this command. Only
-            // present if at least one retry was needed (single-attempt
-            // success never opens an event in the first place).
-            self.closeWriteRetryEvent(pending: pending, outcome: .succeeded)
-            self.recomputeAndPublish(for: accessory, reason: "post-write")
-            self.notifyIfAllWritesSettled()
+            self.recomputeAndPublish(for: accessory, reason: "post-write-ack")
         }
     }
 
@@ -623,6 +667,110 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
                     durationMs: finalMs,
                     outcome: outcome
                 )
+            }
+        }
+    }
+
+    /// Decide what to do when a write reaches its 30s budget without the lock
+    /// having CONFIRMED (current_state == target). Three outcomes:
+    ///
+    ///   1. The lock confirmed in the meantime → settle as a (late) success.
+    ///   2. Lock REACHABLE but unconfirmed → record an `.unconfirmed` warning
+    ///      and move the command into `hangingWrites`, leaving HA showing
+    ///      locking/unlocking (the deliberate "it didn't respond" hang). We do
+    ///      NOT revert and do NOT emit `write_reverted` — the persisting
+    ///      transition IS the signal.
+    ///   3. Lock UNREACHABLE → revert (Option B). HA already shows the lock
+    ///      unavailable, and the `unreachableGap` event records the outage, so
+    ///      we don't manufacture a competing hang; we just roll the optimistic
+    ///      state back to reality.
+    private func resolveWriteAtDeadline(hmID: UUID, accessory: HMAccessory, pending: PendingWrite) {
+        guard !pending.completed else { return }
+
+        let liveCurrent: Int? = accessory.services
+            .flatMap { $0.characteristics }
+            .first { $0.characteristicType == HMCharacteristicTypeCurrentLockMechanismState }
+            .flatMap { ($0.value as? NSNumber)?.intValue }
+
+        // 1. Confirmed already (a late characteristic update we haven't acted
+        // on yet) — settle as success.
+        if let c = liveCurrent, c == pending.target {
+            log("Lock \(accessory.name): confirmed at deadline (current=\(pending.target))")
+            pending.completed = true
+            pendingWrites.removeValue(forKey: hmID)
+            closeWriteRetryEvent(pending: pending, outcome: .succeeded)
+            recomputeAndPublish(for: accessory, reason: "deadline-confirmed")
+            notifyIfAllWritesSettled()
+            return
+        }
+
+        if accessory.isReachable {
+            // 2. Reachable but unconfirmed → hang + warn.
+            pending.completed = true
+            pendingWrites.removeValue(forKey: hmID)   // stop retrying; release focus
+            let eventID = recordUnconfirmed(pending: pending, accessory: accessory)
+            hangingWrites[hmID] = HangingWrite(
+                target: pending.target,
+                startedAt: pending.startedAt,
+                eventID: eventID,
+                priorState: pending.priorState
+            )
+            log("Lock \(accessory.name): reachable but \(pending.target == 1 ? "lock" : "unlock") not confirmed after \(Int(Self.writeBudgetSeconds))s — leaving HA in-progress (hang)")
+            notifyIfAllWritesSettled()
+            // Re-publish with the hang marker now set so deriveLifecycle keeps
+            // showing locking/unlocking past the transition window.
+            recomputeAndPublish(for: accessory, reason: "write-unconfirmed-hang")
+        } else {
+            // 3. Unreachable → revert (HA already shows unavailable).
+            revertPending(hmID: hmID, accessory: accessory, pending: pending)
+        }
+    }
+
+    /// Record (or finalize) the `.unconfirmed` warning for a write that hit its
+    /// budget on a reachable lock. If an `.writeRetry` event was already opened
+    /// (the lock 82'd at least once), flip it to `.unconfirmed`; otherwise open
+    /// a fresh one (the homed-accepted-but-never-actuated case left no trace
+    /// yet). Returns the event ID so a late confirmation can flip it to
+    /// `.succeeded`.
+    private func recordUnconfirmed(pending: PendingWrite, accessory: HMAccessory) -> UUID? {
+        guard let log = lockEventLog else { return nil }
+        let actionLabel = pending.target == 1 ? "lock" : "unlock"
+        let elapsedMs = Int(Date().timeIntervalSince(pending.startedAt) * 1000)
+        if let id = pending.retryLogEventID {
+            log.update(id: id) { e in
+                if case .writeRetry(let action, let attempts, _, _) = e.kind {
+                    e.kind = .writeRetry(targetAction: action, attempts: attempts,
+                                         durationMs: elapsedMs, outcome: .unconfirmed)
+                }
+            }
+            return id
+        }
+        let newID = UUID()
+        log.record(.init(
+            id: newID,
+            accessoryName: accessory.name,
+            accessoryID: accessory.uniqueIdentifier.uuidString,
+            timestamp: pending.startedAt,
+            kind: .writeRetry(targetAction: actionLabel, attempts: max(1, pending.attempt),
+                              durationMs: elapsedMs, outcome: .unconfirmed)
+        ))
+        return newID
+    }
+
+    /// A hung (`.unconfirmed`) write was confirmed late — the lock finally
+    /// reached the target. Clear the hang marker and flip its warning to
+    /// `.succeeded`. Called from recomputeAndPublish's confirmation block.
+    private func resolveHangingWrite(_ hung: HangingWrite, id: UUID, accessoryName: String) {
+        hangingWrites.removeValue(forKey: id)
+        lastTargetChange.removeValue(forKey: id)
+        log("Lock \(accessoryName): previously-unconfirmed write (target=\(hung.target)) confirmed late")
+        if let eventID = hung.eventID, let log = lockEventLog {
+            let finalMs = Int(Date().timeIntervalSince(hung.startedAt) * 1000)
+            log.update(id: eventID) { e in
+                if case .writeRetry(let action, let attempts, _, _) = e.kind {
+                    e.kind = .writeRetry(targetAction: action, attempts: attempts,
+                                         durationMs: finalMs, outcome: .succeeded)
+                }
             }
         }
     }
@@ -854,6 +1002,8 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         if let pending = pendingWrites.removeValue(forKey: id) {
             pending.completed = true
         }
+        // Drop any unconfirmed-hang marker too (no lock left to confirm it).
+        hangingWrites.removeValue(forKey: id)
         notifyIfAllWritesSettled()
         reachabilityRecoveryWaiters.removeValue(forKey: id)
         // If we were tracking an open reachability gap, drop it on the
@@ -1233,6 +1383,14 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         let priorTargetRaw = stateStore[id]?.targetStateRaw
         if let nt = newTargetRaw, nt != priorTargetRaw {
             lastTargetChange[id] = Date()
+            // An external retarget (someone changed the target via Apple Home,
+            // HomeKey, another controller, etc.) in a different direction
+            // supersedes a hung command — drop the stale hang marker so we
+            // stop showing the old transition forever.
+            if let hung = hangingWrites[id], hung.target != nt {
+                log("Lock \(accessory.name): hung write (target=\(hung.target)) superseded by external retarget=\(nt)")
+                hangingWrites.removeValue(forKey: id)
+            }
         }
 
         let computed = AccessoryState.from(
@@ -1242,7 +1400,12 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             // NOT fed into stableID or the identity cache (those still use the
             // bare accessory name), so this can't reassign existing wire ids.
             homeName: homeManager.homes.count > 1 ? homeNameForAccessory[id] : nil,
-            lastTargetChange: lastTargetChange[id]
+            lastTargetChange: lastTargetChange[id],
+            // While a command is outstanding-and-unconfirmed, keep showing the
+            // transition indefinitely (the HA "hang") instead of settling to
+            // the stale current_state after the window. Confirmation (c == t)
+            // still settles immediately — see deriveLifecycle.
+            transitionWindow: hasOutstandingWrite(id) ? .greatestFiniteMagnitude : Self.writeBudgetSeconds
         )
 
         // Pin the wire ID via the persistent identity cache so it stays
@@ -1324,10 +1487,15 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         // natural lifecycle settle. Note this runs BEFORE the dedup check
         // below so it triggers even on no-op recomputes.
         if let pending = pendingWrites[id], let cr = newState.currentStateRaw, cr == pending.target {
-            log("Lock \(accessory.name): pending write target=\(pending.target) satisfied by external change; cancelling background retry")
+            // If homed already accepted our write (acked), reaching the target
+            // is OUR command confirming → `.succeeded`. If it hasn't acked yet
+            // (still retrying / pre-ack), the target was reached by some other
+            // path (HomeKey, manual, another controller) → `.satisfiedExternally`.
+            let outcome: LockEventLog.WriteOutcome = pending.acked ? .succeeded : .satisfiedExternally
+            log("Lock \(accessory.name): pending write target=\(pending.target) confirmed (\(outcome.rawValue)); cancelling background retry")
             pending.completed = true
             pendingWrites.removeValue(forKey: id)
-            closeWriteRetryEvent(pending: pending, outcome: .satisfiedExternally)
+            closeWriteRetryEvent(pending: pending, outcome: outcome)
             notifyIfAllWritesSettled()
             // Clearing the transition window lets deriveLifecycle return
             // a stable "locked"/"unlocked" since current==target. We don't
@@ -1337,6 +1505,16 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             // and the optimistic state we published earlier will fade
             // into the stable state via that path.
             lastTargetChange.removeValue(forKey: id)
+        }
+
+        // Late confirmation of a previously-hung (`.unconfirmed`) write: the
+        // lock finally reached the target. Clear the hang and flip its warning
+        // to succeeded. (An id is only ever in pendingWrites OR hangingWrites,
+        // never both, so this and the block above don't both fire.) `newState`
+        // was computed with current==target, so deriveLifecycle already
+        // returned the settled state — publishing it below ends the HA hang.
+        if let hung = hangingWrites[id], let cr = newState.currentStateRaw, cr == hung.target {
+            resolveHangingWrite(hung, id: id, accessoryName: accessory.name)
         }
 
         let prior = stateStore[id]

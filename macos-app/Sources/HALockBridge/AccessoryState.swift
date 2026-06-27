@@ -54,13 +54,15 @@ struct AccessoryState: Codable, Equatable {
     /// state for HA before HomeKit has actually accepted the write — the
     /// HMCharacteristic value for target hasn't been written yet, so we
     /// can't get this from `AccessoryState.from` directly.
-    func with(target newTargetRaw: Int, lastTargetChange: Date?, now: Date = Date()) -> AccessoryState {
+    func with(target newTargetRaw: Int, lastTargetChange: Date?, now: Date = Date(),
+              transitionWindow: TimeInterval = 30) -> AccessoryState {
         let newLifecycle = deriveLifecycle(
             current: self.currentStateRaw,
             target: newTargetRaw,
             reachable: self.reachable,
             lastTargetChange: lastTargetChange,
-            now: now
+            now: now,
+            transitionWindow: transitionWindow
         )
         return AccessoryState(
             id: self.id,
@@ -127,7 +129,7 @@ struct AccessoryState: Codable, Equatable {
             && lowBattery == other.lowBattery
     }
 
-    static func from(accessory: HMAccessory, info: [String: String], homeName: String? = nil, lastTargetChange: Date? = nil, now: Date = Date()) -> AccessoryState {
+    static func from(accessory: HMAccessory, info: [String: String], homeName: String? = nil, lastTargetChange: Date? = nil, now: Date = Date(), transitionWindow: TimeInterval = 30) -> AccessoryState {
         var current: Int?
         var target: Int?
         var battery: Int?
@@ -154,7 +156,8 @@ struct AccessoryState: Codable, Equatable {
             target: target,
             reachable: accessory.isReachable,
             lastTargetChange: lastTargetChange,
-            now: now
+            now: now,
+            transitionWindow: transitionWindow
         )
 
         return AccessoryState(
@@ -209,12 +212,17 @@ func deriveLifecycle(
     lastTargetChange: Date?,
     now: Date,
     // Matched to `writeBudgetSeconds` in HomeKitMonitor.setLockState so
-    // HA's UI keeps showing "locking"/"unlocking" for the entire retry
+    // HA's UI keeps showing "locking"/"unlocking" for the whole retry
     // window rather than reverting to a stable state derived from the
-    // stale current_state. Bumped 15s → 30s → 90s in lockstep with the
-    // retry budget; see the comment on writeBudgetSeconds for why
-    // 90s covers most real-world deep-sleep wake-up paths.
-    transitionWindow: TimeInterval = 90
+    // stale current_state. Standardized to 30s in 0.6.7 (was 90s).
+    //
+    // HomeKitMonitor passes an effectively-infinite window while a write
+    // is outstanding-and-unconfirmed for the accessory, which is how an
+    // un-actuated command makes HA "hang" on locking/unlocking instead of
+    // silently settling — see `hasOutstandingWrite` / the `.unconfirmed`
+    // path. The c == t branch above returns the stable state before this
+    // check, so an infinite window never blocks a genuine confirmation.
+    transitionWindow: TimeInterval = 30
 ) -> String {
     if current == 2 { return "jammed" }
     guard let c = current else { return "unknown" }

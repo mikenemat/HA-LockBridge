@@ -4,6 +4,33 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.6.7] — 2026-06-26
+
+### Changed
+- **A lock command is now "done" only when the lock CONFIRMS it** (its
+  `current_state` reaches the target), not when `homed` merely accepts the
+  write. This closes a blind spot where a lock that accepted a command but
+  never actually actuated (slow/flaky hardware) was silently reported as
+  success, with no warning and no signal to Home Assistant.
+- **A reachable lock that doesn't confirm within the budget now "hangs"
+  visibly** instead of silently settling: the bridge keeps reporting
+  `locking`/`unlocking`, so the HA entity stays on *Locking…/Unlocking…* until
+  the lock confirms, a new command supersedes it, or it's operated externally
+  — and the in-app Stats page logs a `.unconfirmed` ("not confirmed — lock
+  didn't respond") row. This is the user-visible "it didn't respond" signal,
+  bridge-side only (no HA integration changes).
+- **Unreachable locks are left to the existing availability path, not
+  conflated with the confirmation timeout.** When `homed` reports the lock
+  unreachable (`reachable=false`), HA already shows it *Unavailable* (plus the
+  `unreachableGap` Stats row); the bridge reverts the optimistic write rather
+  than manufacturing a competing hang.
+- **Write budget / lifecycle transition window standardized to 30s (was 90s).**
+  The 90s value was sized for slow deep-sleep wake-ups that were really the
+  pre-0.6.0 foreground write-stall (fixed by appliance mode); 30s is
+  sufficient. Within the window a reachability-recovery still fires a retry
+  immediately, so briefly-asleep locks are unaffected.
+- `MARKETING_VERSION` 0.6.6 → 0.6.7, `CURRENT_PROJECT_VERSION` 20 → 21.
+
 ## [0.6.6] — 2026-06-15
 
 ### Fixed

@@ -105,11 +105,21 @@ app, etc.) — it never disrupts the primary pairing.
 
 7. **Lifecycle state derivation is on the bridge.** The bridge synthesizes
    `lifecycle_state` (one of `locked`/`unlocked`/`locking`/`unlocking`/
-   `jammed`/`unknown`) using a 90s transition window after `target_state`
-   changes (matching the write-retry budget — a HomeKit lock can take that
-   long to wake and actuate). HA maps this directly to `LockEntity.is_locked` /
-   `is_locking` / `is_unlocking` / `is_jammed`. Keep the timing logic on the
-   bridge — duplicating it in HA invites drift.
+   `jammed`/`unknown`) using a 30s transition window after `target_state`
+   changes (matching `writeBudgetSeconds`). HA maps this directly to
+   `LockEntity.is_locked` / `is_locking` / `is_unlocking` / `is_jammed`. Keep
+   the timing logic on the bridge — duplicating it in HA invites drift.
+   **A write is "done" only when the lock CONFIRMS it** (`current_state ==
+   target`), not when `homed` acks it. If the 30s budget elapses unconfirmed
+   while the lock is still **reachable**, the bridge deliberately keeps
+   reporting `locking`/`unlocking` (it feeds `deriveLifecycle` an infinite
+   transition window via `hasOutstandingWrite`) so HA *hangs* on the
+   in-progress state — that hang is the user-visible "it didn't respond"
+   signal, paired with a `.unconfirmed` row in the in-app Stats log. An
+   **unreachable** lock is instead reverted (HA already shows it unavailable
+   via `reachable=false`; don't conflate a 30s confirmation timeout with a
+   genuine reachability/availability condition). The 30s budget was 90s
+   pre-0.6.7 — see `writeBudgetSeconds` for why it was cut.
 
 8. **HA's `start_ws_loop()` is called AFTER `async_forward_entry_setups`.**
    The opposite order races: the first WS connect's `SIGNAL_CONNECTED`

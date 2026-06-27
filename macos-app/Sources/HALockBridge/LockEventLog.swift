@@ -26,16 +26,30 @@ final class LockEventLog {
     enum WriteOutcome: String, Equatable {
         /// Background retry loop is still running. Initial state.
         case ongoing
-        /// HomeKit accepted the write before the 30s budget elapsed.
+        /// The lock CONFIRMED the new state — its physical current_state
+        /// reached the requested target. The only true success. (A late
+        /// confirmation of an `.unconfirmed` write transitions to this.)
         case succeeded
-        /// 30s budget elapsed without HomeKit accepting; optimistic
-        /// state was silently reverted (Option 2 Pick A).
+        /// The 30s budget elapsed while the lock was UNREACHABLE
+        /// (HMError 82 throughout); the optimistic state was reverted to
+        /// the last-known-good. HA already shows the lock unavailable in
+        /// this case, so the revert isn't the user-facing signal — the
+        /// unavailability is. Contrast with `.unconfirmed`.
         case reverted
         /// The lock's physical current_state reached the requested
         /// target via an external path (HomeKey, manual operation,
         /// other HomeKit controller) while we were still retrying.
         /// The pending write was cancelled — no revert needed.
         case satisfiedExternally
+        /// The 30s budget elapsed while the lock was REACHABLE but its
+        /// current_state never reached the target — homed accepted the
+        /// write (or kept 82-ing on a still-reachable lock) yet the bolt
+        /// didn't move. The optimistic state is deliberately LEFT in
+        /// place so HA keeps showing "locking"/"unlocking" (a visible
+        /// "this didn't complete" hang) until the lock confirms, a new
+        /// command supersedes it, or it's operated externally. Becomes
+        /// `.succeeded` if the lock confirms late.
+        case unconfirmed
     }
 
     enum Kind: Equatable {
