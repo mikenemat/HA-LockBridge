@@ -72,11 +72,14 @@ final class LockEventLog {
         /// still not `.active` afterwards — HomeKit may stall the write. A
         /// diagnostic for the appliance-mode focus invariant.
         case focusGrabFailed
-        /// A command that DID confirm (current reached target) but took longer
-        /// than the slow-confirm threshold to do so. Informational — the
-        /// command succeeded — but surfaces a sluggish lock that responds
-        /// within budget yet slowly. `durationMs` is command → confirmation.
-        case slowConfirm(targetAction: String, durationMs: Int)
+        /// A command that is taking longer than the slow-confirm threshold
+        /// (15s) to confirm. Opened PROACTIVELY at the 15s mark while the
+        /// command is still outstanding (`ongoing == true`, `durationMs` is the
+        /// elapsed-so-far and goes stale until the next repaint), then finalized
+        /// to `ongoing == false` with the real command→confirmation time once
+        /// the lock responds. A still-`ongoing` row means the lock hasn't
+        /// responded yet. Surfaces a sluggish-but-reachable lock.
+        case slowConfirm(targetAction: String, durationMs: Int, ongoing: Bool)
     }
 
     struct Event: Identifiable, Equatable {
@@ -117,10 +120,11 @@ final class LockEventLog {
                 obj["detail"] = detail
             case .focusGrabFailed:
                 obj["kind"] = "focus_grab_failed"
-            case .slowConfirm(let action, let durationMs):
+            case .slowConfirm(let action, let durationMs, let ongoing):
                 obj["kind"] = "slow_confirm"
                 obj["action"] = action
                 obj["duration_ms"] = durationMs
+                obj["ongoing"] = ongoing
             }
             return obj
         }

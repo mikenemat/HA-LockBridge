@@ -48,6 +48,10 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         /// writes don't create a log entry (the user only wants to see
         /// the rough edges, not every successful command).
         var retryLogEventID: UUID?
+        /// LockEventLog event ID for the PROACTIVE `.slowConfirm` row, opened by
+        /// the 15s slow-timer when a reachable command still hasn't confirmed.
+        /// Nil until then. Finalized (ongoing→false) when the lock confirms.
+        var slowEventID: UUID?
 
         init(target: Int, priorState: AccessoryState?, deadline: Date, startedAt: Date) {
             self.target = target
@@ -511,8 +515,18 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         )
         pendingWrites[hmID] = pending
 
-        // Safety net: a deadline timer that calls revert() if the loop is
-        // still pending when the budget expires. The retry loop also
+        // Proactive "slow" timer: if the command still hasn't confirmed at the
+        // slow threshold (15s), open a `.slowConfirm` row NOW so a sluggish lock
+        // shows up while it's still struggling — not only after it finally
+        // responds. Fires well before the 30s budget; the row is finalized (or
+        // left ongoing if it hangs) by the confirmation paths.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.slowConfirmThresholdSeconds) { [weak self] in
+            guard let self = self, let still = self.pendingWrites[hmID], still === pending, !still.completed else { return }
+            self.markSlowIfStillPending(hmID: hmID, accessory: accessory, pending: still)
+        }
+
+        // Safety net: a deadline timer that resolves (hang/revert) if the loop
+        // is still pending when the budget expires. The retry loop also
         // checks the deadline before scheduling, so in the common case the
         // loop's own check fires first and the safety net is a no-op.
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.writeBudgetSeconds) { [weak self] in
@@ -617,6 +631,10 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     /// or advance the attempt counter on subsequent 82s.
     private func recordOrAdvanceWriteRetry(pending: PendingWrite, accessory: HMAccessory) {
         guard let log = lockEventLog else { return }
+        // If a proactive slow row is already open for this command (82 arrived
+        // only after the 15s slow-timer fired), let it stand instead of opening
+        // a second row — the slow row already represents the trouble.
+        if pending.slowEventID != nil { return }
         let actionLabel = pending.target == 1 ? "lock" : "unlock"
         let elapsedMs = Int(Date().timeIntervalSince(pending.startedAt) * 1000)
         if let id = pending.retryLogEventID {
@@ -737,8 +755,7 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             log("Lock \(accessory.name): confirmed at deadline (current=\(pending.target))")
             pending.completed = true
             pendingWrites.removeValue(forKey: hmID)
-            recordSlowConfirmIfNeeded(target: pending.target, startedAt: pending.startedAt,
-                                      hadRetryEvent: pending.retryLogEventID != nil, accessory: accessory)
+            resolveSlowConfirm(pending: pending, accessory: accessory)
             closeWriteRetryEvent(pending: pending, outcome: pending.acked ? .succeeded : .satisfiedExternally)
             recomputeAndPublish(for: accessory, reason: "deadline-confirmed")
             notifyIfAllWritesSettled()
@@ -746,10 +763,12 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         }
 
         if accessory.isReachable {
-            // 2. Reachable but unconfirmed → hang + warn.
+            // 2. Reachable but unconfirmed → hang. A proactive slow row (opened
+            // at 15s) already says "no response yet" — reuse it as the hang's
+            // event; otherwise open the `.unconfirmed` row.
             pending.completed = true
             pendingWrites.removeValue(forKey: hmID)   // stop retrying; release focus
-            let eventID = recordUnconfirmed(pending: pending, accessory: accessory)
+            let eventID = pending.slowEventID ?? recordUnconfirmed(pending: pending, accessory: accessory)
             hangingWrites[hmID] = HangingWrite(
                 target: pending.target,
                 startedAt: pending.startedAt,
@@ -798,24 +817,59 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         return newID
     }
 
-    /// Record a `.slowConfirm` warning if a command confirmed (current reached
-    /// target) but took longer than the slow threshold. Skipped when a
-    /// writeRetry event already exists (an 82 write whose own event shows the
-    /// delay) to avoid double-logging; the `>writeBudgetSeconds` hang case is
-    /// likewise covered by its own `.unconfirmed`→`.succeeded` row, so this
-    /// fires for the in-budget-but-slow (≈15–30s) confirmations that would
-    /// otherwise leave no trace.
-    private func recordSlowConfirmIfNeeded(target: Int, startedAt: Date, hadRetryEvent: Bool, accessory: HMAccessory) {
-        guard !hadRetryEvent, let log = lockEventLog else { return }
-        let elapsed = Date().timeIntervalSince(startedAt)
+    /// 15s slow-timer body: if the command is still pending-and-unconfirmed on
+    /// a reachable lock (and no 82-retry event already covers it), open a
+    /// PROACTIVE `.slowConfirm` row marked ongoing, so a sluggish lock shows up
+    /// at 15s instead of only when it finally responds.
+    private func markSlowIfStillPending(hmID: UUID, accessory: HMAccessory, pending: PendingWrite) {
+        guard !pending.completed, pending.slowEventID == nil, pending.retryLogEventID == nil,
+              accessory.isReachable, let eventLog = lockEventLog else { return }
+        let cur = accessory.services
+            .flatMap { $0.characteristics }
+            .first { $0.characteristicType == HMCharacteristicTypeCurrentLockMechanismState }
+            .flatMap { ($0.value as? NSNumber)?.intValue }
+        guard cur != pending.target else { return }   // already at target → not slow
+        let id = UUID()
+        pending.slowEventID = id
+        eventLog.record(.init(
+            id: id,
+            accessoryName: accessory.name,
+            accessoryID: accessory.uniqueIdentifier.uuidString,
+            timestamp: pending.startedAt,
+            kind: .slowConfirm(targetAction: pending.target == 1 ? "lock" : "unlock",
+                               durationMs: Int(Date().timeIntervalSince(pending.startedAt) * 1000),
+                               ongoing: true)
+        ))
+        log("Lock \(accessory.name): \(pending.target == 1 ? "lock" : "unlock") not confirmed after \(Int(Self.slowConfirmThresholdSeconds))s — flagged slow (in progress)")
+    }
+
+    /// At confirmation (current reached target): resolve the slow-confirm row.
+    /// If we opened a proactive ongoing row, finalize it (ongoing→false with the
+    /// real duration). Otherwise — no proactive row and no 82-retry event — and
+    /// the command still took longer than the threshold, record a closed
+    /// `.slowConfirm` (covers a confirmation that slipped just past the 15s
+    /// timer). An 82-retry event already shows its own delay, so it's skipped.
+    private func resolveSlowConfirm(pending: PendingWrite, accessory: HMAccessory) {
+        guard let log = lockEventLog else { return }
+        if let id = pending.slowEventID {
+            let finalMs = Int(Date().timeIntervalSince(pending.startedAt) * 1000)
+            log.update(id: id) { e in
+                if case .slowConfirm(let action, _, _) = e.kind {
+                    e.kind = .slowConfirm(targetAction: action, durationMs: finalMs, ongoing: false)
+                }
+            }
+            return
+        }
+        guard pending.retryLogEventID == nil else { return }
+        let elapsed = Date().timeIntervalSince(pending.startedAt)
         guard elapsed >= Self.slowConfirmThresholdSeconds else { return }
         log.record(.init(
             id: UUID(),
             accessoryName: accessory.name,
             accessoryID: accessory.uniqueIdentifier.uuidString,
-            timestamp: startedAt,
-            kind: .slowConfirm(targetAction: target == 1 ? "lock" : "unlock",
-                               durationMs: Int(elapsed * 1000))
+            timestamp: pending.startedAt,
+            kind: .slowConfirm(targetAction: pending.target == 1 ? "lock" : "unlock",
+                               durationMs: Int(elapsed * 1000), ongoing: false)
         ))
     }
 
@@ -829,9 +883,14 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
         if let eventID = hung.eventID, let log = lockEventLog {
             let finalMs = Int(Date().timeIntervalSince(hung.startedAt) * 1000)
             log.update(id: eventID) { e in
-                if case .writeRetry(let action, let attempts, _, _) = e.kind {
+                switch e.kind {
+                case .writeRetry(let action, let attempts, _, _):
                     e.kind = .writeRetry(targetAction: action, attempts: attempts,
                                          durationMs: finalMs, outcome: .succeeded)
+                case .slowConfirm(let action, _, _):
+                    e.kind = .slowConfirm(targetAction: action, durationMs: finalMs, ongoing: false)
+                default:
+                    break
                 }
             }
         }
@@ -1557,8 +1616,7 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
             log("Lock \(accessory.name): pending write target=\(pending.target) confirmed (\(outcome.rawValue)); cancelling background retry")
             pending.completed = true
             pendingWrites.removeValue(forKey: id)
-            recordSlowConfirmIfNeeded(target: pending.target, startedAt: pending.startedAt,
-                                      hadRetryEvent: pending.retryLogEventID != nil, accessory: accessory)
+            resolveSlowConfirm(pending: pending, accessory: accessory)
             closeWriteRetryEvent(pending: pending, outcome: outcome)
             notifyIfAllWritesSettled()
             // Clearing the transition window lets deriveLifecycle return

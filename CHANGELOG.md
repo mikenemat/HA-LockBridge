@@ -4,6 +4,20 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.6.9] — 2026-06-26
+
+### Changed
+- **Slow-command warnings are now PROACTIVE.** 0.6.8 only recorded a
+  `slow_confirm` row when the command finally confirmed (so for a lock that
+  takes ~32s, the row didn't appear until ~32s). A 15s timer now opens the
+  `slow_confirm` row *while the command is still outstanding* — it shows
+  "slow <action> — no response yet" at the 15s mark and is finalized to
+  "succeeded but took a while" with the real duration once the lock responds
+  (or stays "no response yet" if it hangs past 30s). One row per command: a
+  proactively-opened slow row is reused by the 30s hang path and finalized by a
+  late confirmation, and an 82-retry row suppresses a duplicate slow row.
+- `MARKETING_VERSION` 0.6.8 → 0.6.9, `CURRENT_PROJECT_VERSION` 22 → 23.
+
 ## [0.6.8] — 2026-06-26
 
 ### Added
