@@ -517,9 +517,10 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     }
 
     /// One write attempt for a pending background write. Reschedules itself
-    /// on transient `HMError 82` until the deadline; calls `revertPending`
-    /// or `completeSuccess` on terminal outcomes. Always called on the
-    /// main thread.
+    /// on transient `HMError 82` until the deadline. On a non-82 error it
+    /// reverts; on homed-ack it marks the write `acked` and waits for the lock
+    /// to confirm; at the deadline it hands off to `resolveWriteAtDeadline`.
+    /// Always called on the main thread.
     private func attemptBackgroundWrite(
         targetChar: HMCharacteristic,
         accessory: HMAccessory,
@@ -687,18 +688,48 @@ final class HomeKitMonitor: NSObject, HMHomeManagerDelegate, HMHomeDelegate, HMA
     private func resolveWriteAtDeadline(hmID: UUID, accessory: HMAccessory, pending: PendingWrite) {
         guard !pending.completed else { return }
 
-        let liveCurrent: Int? = accessory.services
+        let currentChar = accessory.services
             .flatMap { $0.characteristics }
             .first { $0.characteristicType == HMCharacteristicTypeCurrentLockMechanismState }
-            .flatMap { ($0.value as? NSNumber)?.intValue }
 
-        // 1. Confirmed already (a late characteristic update we haven't acted
-        // on yet) — settle as success.
+        // For a REACHABLE lock, take a FRESH read of current_state before
+        // deciding. homed can silently drop a confirmation push (the very
+        // reason the resubscribe pass exists); the cached characteristic value
+        // could then be stale and we'd falsely flag a confirmed write as
+        // `.unconfirmed` and hang HA. For an unreachable lock the read can't
+        // succeed and we're reverting regardless, so skip it and use the cache.
+        if accessory.isReachable, let currentChar = currentChar {
+            currentChar.readValue { [weak self] _ in
+                // HomeKit delivers readValue completions on the main thread
+                // (same as subscribe()/readInfo()). On a read error the value
+                // simply stays whatever was cached — no worse than before.
+                self?.finishResolveAtDeadline(
+                    hmID: hmID, accessory: accessory, pending: pending,
+                    liveCurrent: (currentChar.value as? NSNumber)?.intValue
+                )
+            }
+            return
+        }
+        finishResolveAtDeadline(
+            hmID: hmID, accessory: accessory, pending: pending,
+            liveCurrent: (currentChar?.value as? NSNumber)?.intValue
+        )
+    }
+
+    /// Apply the deadline decision (confirmed / hang / revert) given the
+    /// best-available `current_state`. Split out of `resolveWriteAtDeadline` so
+    /// the reachable path can fetch a fresh read first.
+    private func finishResolveAtDeadline(hmID: UUID, accessory: HMAccessory, pending: PendingWrite, liveCurrent: Int?) {
+        guard !pending.completed else { return }
+
+        // 1. Confirmed — current reached target. Settle as a (late) success;
+        // `.satisfiedExternally` if we never even got an ack (some other path
+        // got there), matching the recomputeAndPublish confirmation block.
         if let c = liveCurrent, c == pending.target {
             log("Lock \(accessory.name): confirmed at deadline (current=\(pending.target))")
             pending.completed = true
             pendingWrites.removeValue(forKey: hmID)
-            closeWriteRetryEvent(pending: pending, outcome: .succeeded)
+            closeWriteRetryEvent(pending: pending, outcome: pending.acked ? .succeeded : .satisfiedExternally)
             recomputeAndPublish(for: accessory, reason: "deadline-confirmed")
             notifyIfAllWritesSettled()
             return
