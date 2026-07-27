@@ -51,6 +51,24 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     /// AFTER we've already restored focus, permanently re-stealing it.
     private var pendingFocusReGrab: DispatchWorkItem?
 
+    /// When true, never steal focus for a HomeKit write.
+    ///
+    /// HomeKit services writes *promptly* only for the frontmost app, so with
+    /// this on, writes still go through but are serviced on HomeKit's slow
+    /// path — expect multi-second lag. That is a deliberate trade: on a Mac you
+    /// actually use, having the bridge yank focus on every lock command is
+    /// worse than an unlock that takes a few seconds. Reads (state, battery)
+    /// are unaffected either way; they never needed the foreground.
+    ///
+    /// Precedence: `--no-activate` > `--activate` > stored default.
+    /// The stored default matters because a Login Item launch gets no CLI args:
+    ///   defaults write co.brunoramos.HALockBridgeApp NoActivateOnWrite -bool YES
+    static var noActivateOnWrite: Bool {
+        if CommandLine.arguments.contains("--no-activate") { return true }
+        if CommandLine.arguments.contains("--activate") { return false }
+        return UserDefaults.standard.bool(forKey: "NoActivateOnWrite")
+    }
+
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
@@ -63,6 +81,9 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             reason: "HomeKit lock bridge must stay awake, unthrottled, and frontmost"
         )
         FileHandle.standardError.write(Data("[lockbridge-server] App Nap + idle sleep + display sleep disabled (beginActivity held)\n".utf8))
+        FileHandle.standardError.write(Data((Self.noActivateOnWrite
+            ? "[lockbridge-server] focus-on-write DISABLED (--no-activate): writes serviced backgrounded, expect multi-second lag\n"
+            : "[lockbridge-server] focus-on-write ENABLED: app will come frontmost for each lock command\n").utf8))
 
         let vm = StatusViewModel()
         statusVM = vm
@@ -76,6 +97,9 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         // app. Runs on the main thread (setLockState is main-thread).
         m.onWriteRequested = { [weak self] in
             guard let self = self else { return }
+            // Opt-out: leave focus alone and let HomeKit service the write on
+            // its slow path. See `noActivateOnWrite`.
+            if Self.noActivateOnWrite { return }
             // Remember who was in front, then take focus.
             self.captureFocusTargetIfNeeded()
             self.grabFocus()
@@ -102,6 +126,8 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         // When the last in-flight write settles, hand focus back to whatever
         // app we stole it from — return things to how they were.
         m.onAllWritesSettled = { [weak self] in
+            // Nothing to hand back if we never took focus.
+            if Self.noActivateOnWrite { return }
             self?.restoreFocusTarget()
         }
         // Surface the authorized-but-homeless appliance-rot mode in the UI.
