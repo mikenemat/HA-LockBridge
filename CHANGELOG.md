@@ -4,6 +4,40 @@ All notable changes to HA-LockBridge are documented here.
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and
 follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [HA integration 0.7.0] — 2026-11-26
+
+Integration-only release; the bridge app is unchanged.
+
+### Fixed
+- **Renaming an entity ID no longer kills the entity.** On Home Assistant
+  2026.11, changing a lock's (or its battery / jammed sensor's) entity ID in the
+  UI left it with no state at all — "Error adding entity … for domain lock with
+  platform ha_lockbridge" in the log — until the integration was reloaded or HA
+  restarted. Lock devices were linked to the bridge device with
+  `DeviceInfo(via_device=…)`, which Home Assistant has deprecated: at startup
+  that only logged a warning, but on a rename core re-adds the entity itself,
+  attributes the deprecated call to its own `config` integration, and raises
+  instead of warning. The link now uses `via_device_id`.
+- No more "calls `device_registry.async_get_or_create` with a deprecated
+  `via_device` parameter" warnings at startup (one each for the lock, sensor
+  and binary_sensor platforms).
+
+### Changed
+- **Minimum Home Assistant is now 2026.8.0** (was 2026.3.0) — the first
+  release with `via_device_id`. `hacs.json` enforces it, so HACS won't offer
+  this update on an older HA; a manual install on an older HA would fail to
+  load its lock entities. 0.6.3 is the last release for HA 2026.3 – 2026.7.
+- The bridge-device link can never stop a lock from loading: if the bridge
+  device is missing from the device registry the link is simply left out.
+- HA integration `manifest.json` 0.6.3 → 0.7.0.
+
+### Added
+- Regression tests that run the integration inside a real Home Assistant test
+  core (`tests/test_device_registry.py`): entities load without the deprecation
+  report, and an entity-ID rename through the frontend's websocket command
+  keeps every entity alive. A new CI job runs them against the newest Home
+  Assistant and against 2026.8.0, the minimum.
+
 ## [0.6.9] — 2026-06-26
 
 ### Changed

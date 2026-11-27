@@ -35,7 +35,7 @@ def _extract_funcs(module_path: pathlib.Path, names: set[str], ns: dict[str, Any
     `ns` should be pre-populated with any module-level names the functions
     reference (constants, typing aliases, etc.).
     """
-    tree = ast.parse(module_path.read_text())
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
     wanted: list[ast.stmt] = [
         node
         for node in tree.body
@@ -54,7 +54,7 @@ def _load_const(name: str) -> Any:
     """Read a single simple constant assignment out of const.py without importing
     it (const.py has no heavy imports, but this keeps us uniform and robust to
     future additions)."""
-    tree = ast.parse((INTEGRATION / "const.py").read_text())
+    tree = ast.parse((INTEGRATION / "const.py").read_text(encoding="utf-8"))
     for node in tree.body:
         if isinstance(node, ast.Assign):
             for target in node.targets:
@@ -348,7 +348,7 @@ def test_lifecycle_jammed():
 def test_lock_py_returns_none_on_unknown():
     """Guard: lock.py's is_* properties must short-circuit unknown -> None
     (the bug was returning False, which HA renders as 'Unlocked')."""
-    src = (INTEGRATION / "lock.py").read_text()
+    src = (INTEGRATION / "lock.py").read_text(encoding="utf-8")
     # Each property returns None for unknown before comparing the specific state.
     assert 'None if lc == "unknown"' in src, (
         "lock.py must return None when lifecycle is unknown"
@@ -364,7 +364,7 @@ def test_lock_py_returns_none_on_unknown():
 def test_ws_keeps_token_query_and_adds_header():
     """Old bridges read the ?token= query; current bridges prefer the header.
     Sending BOTH is what keeps new-integration <-> old-bridge working."""
-    src = (INTEGRATION / "client.py").read_text()
+    src = (INTEGRATION / "client.py").read_text(encoding="utf-8")
     assert "/events?token=" in src, "WS URL must keep ?token= for old bridges"
     assert "headers=self._headers" in src, "WS connect must also send the auth header"
 
@@ -372,7 +372,7 @@ def test_ws_keeps_token_query_and_adds_header():
 def test_no_raw_exception_logging_in_ws_loop():
     """Token-leak guard: the WS reconnect/handshake logging must not %-format the
     raw aiohttp exception (its __str__ embeds the token-bearing URL)."""
-    src = (INTEGRATION / "client.py").read_text()
+    src = (INTEGRATION / "client.py").read_text(encoding="utf-8")
     # The reconnect log line logs the type name, not the exception object.
     assert "type(err).__name__" in src
     # And it must not interpolate `err` itself in that reconnect message.
@@ -380,16 +380,16 @@ def test_no_raw_exception_logging_in_ws_loop():
 
 
 def test_protocol_is_tolerant_and_capped():
-    src = (INTEGRATION / "client.py").read_text()
-    const_src = (INTEGRATION / "const.py").read_text()
+    src = (INTEGRATION / "client.py").read_text(encoding="utf-8")
+    const_src = (INTEGRATION / "const.py").read_text(encoding="utf-8")
     assert "MAX_SUPPORTED_PROTOCOL" in const_src
     # We read protocol but never refuse to operate on a higher value (no raise).
     assert 'payload.get("protocol")' in src
 
 
 def test_write_reverted_fires_bus_event():
-    src = (INTEGRATION / "client.py").read_text()
-    const_src = (INTEGRATION / "const.py").read_text()
+    src = (INTEGRATION / "client.py").read_text(encoding="utf-8")
+    const_src = (INTEGRATION / "const.py").read_text(encoding="utf-8")
     assert 'EVENT_WRITE_REVERTED = "ha_lockbridge_write_reverted"' in const_src
     assert 'mtype == "write_reverted"' in src
     assert "bus.async_fire(EVENT_WRITE_REVERTED" in src
@@ -401,7 +401,7 @@ def test_write_reverted_fires_bus_event():
 
 
 def test_manifest_is_valid_json_and_has_required_fields():
-    manifest = json.loads((INTEGRATION / "manifest.json").read_text())
+    manifest = json.loads((INTEGRATION / "manifest.json").read_text(encoding="utf-8"))
     for field in ("domain", "name", "version", "documentation", "codeowners", "iot_class"):
         assert field in manifest, f"manifest.json is missing {field!r}"
     assert manifest["domain"] == "ha_lockbridge"
@@ -410,13 +410,13 @@ def test_manifest_is_valid_json_and_has_required_fields():
 
 
 def test_strings_and_translations_are_in_sync():
-    strings = json.loads((INTEGRATION / "strings.json").read_text())
-    en = json.loads((INTEGRATION / "translations" / "en.json").read_text())
+    strings = json.loads((INTEGRATION / "strings.json").read_text(encoding="utf-8"))
+    en = json.loads((INTEGRATION / "translations" / "en.json").read_text(encoding="utf-8"))
     assert strings == en, "strings.json and translations/en.json must match"
 
 
 def test_reauth_and_already_paired_strings_present():
-    strings = json.loads((INTEGRATION / "strings.json").read_text())
+    strings = json.loads((INTEGRATION / "strings.json").read_text(encoding="utf-8"))
     config = strings["config"]
     assert "reauth_confirm" in config["step"], "missing reauth_confirm step strings"
     assert "already_paired" in config["abort"], "missing already_paired abort string"
@@ -424,7 +424,7 @@ def test_reauth_and_already_paired_strings_present():
 
 
 def test_hacs_json_at_repo_root():
-    data = json.loads((REPO / "hacs.json").read_text())
+    data = json.loads((REPO / "hacs.json").read_text(encoding="utf-8"))
     assert data.get("name"), "hacs.json missing name"
     assert data.get("homeassistant"), "hacs.json missing minimum HA version"
 
@@ -467,7 +467,7 @@ def test_icon_files_present_and_correct_sizes():
 
 
 def test_const_module_declares_critical_constants():
-    text = (INTEGRATION / "const.py").read_text()
+    text = (INTEGRATION / "const.py").read_text(encoding="utf-8")
     for needed in (
         'DOMAIN = "ha_lockbridge"',
         'ZEROCONF_TYPE = "_ha-lockbridge._tcp.local."',

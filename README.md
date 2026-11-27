@@ -198,7 +198,7 @@ HA's flow advances to the device-selection screen with your ThorBolts pre-checke
 | Component | Requirement |
 |---|---|
 | Bridge host | An **always-on, ideally dedicated Mac running macOS 15 (Sequoia) or newer**, signed into the iCloud account your Apple Home lives on, on the same LAN as a HomeKit resident (HomePod / Apple TV / iPad). It must stay awake, logged in, and with **HA-LockBridge as the frontmost app** — it runs as a visible foreground app and keeps the display awake. Using that Mac for other apps will delay lock commands. |
-| HomeAssistant | **2026.3+ recommended** — that release added the brand-icon proxy API the integration's logo uses. Manual installs on older HA versions still work fine; only the integration's logo won't appear. (HACS enforces 2026.3.0 as a hard minimum via `hacs.json`, so use the manual install to run on an earlier version.) |
+| HomeAssistant | **2026.8 or newer (required).** The integration links each lock to the bridge device with `via_device_id`, which Home Assistant added in 2026.8 — on anything older the lock entities fail to load, manual installs included. HACS enforces the minimum via `hacs.json`. Integration 0.6.3 is the last release for HA 2026.3 – 2026.7. |
 | Network | mDNS / Bonjour must traverse between the bridge host and HA. If HA runs in Docker without `--network=host`, mDNS discovery may need extra config. |
 
 ## Caveats

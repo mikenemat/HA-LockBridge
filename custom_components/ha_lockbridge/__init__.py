@@ -36,9 +36,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "Could not reach the HA-LockBridge for the initial snapshot."
         ) from err
 
-    # Register the bridge itself as a "hub" device. Lock entities reference
-    # this device via `via_device` so HA's UI can group them under their hub.
-    # Without it, HA logs a deprecation warning on every entity creation.
+    # Register the bridge itself as a "hub" device. Lock entities link to it
+    # with `via_device_id` (see entity.py) so HA's UI can group them under
+    # their hub. It must exist before the platforms are set up below.
     device_registry = dr.async_get(hass)
     device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
