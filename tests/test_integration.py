@@ -1,14 +1,15 @@
 """Deeper integration tests that need the Home Assistant test rig.
 
-These require `pytest` + `pytest-homeassistant-custom-component` (and therefore
-`homeassistant`, `aiohttp`, `voluptuous`). The dev/CI base image used for the
-quick `python3 -m py_compile` / fallback test pass does NOT have these, so the
-whole module is skipped cleanly when the rig is absent — importing it under a
-bare interpreter must not raise.
+These require `pytest` + a Home Assistant test rig — `pytest-homeassistant`, or
+its predecessor `pytest-homeassistant-custom-component` for HA older than
+2026.11 — (and therefore `homeassistant`, `aiohttp`, `voluptuous`). The bare
+CI job used for the quick `python3 -m py_compile` / fallback test pass does NOT
+have these, so the whole module is skipped cleanly when the rig is absent —
+importing it under a bare interpreter must not raise.
 
-When the rig IS present (`pip install pytest-homeassistant-custom-component`),
-these exercise the client's WS message handling and the back-compat contract
-against a fake bridge.
+When the rig IS present (`pip install pytest-homeassistant`), these exercise
+the client's WS message handling and the back-compat contract against a fake
+bridge. CI's `ha-rig` job runs them.
 """
 from __future__ import annotations
 

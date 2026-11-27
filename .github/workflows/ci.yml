@@ -8,7 +8,10 @@ on:
 
 jobs:
   ha-integration:
-    name: HA integration — syntax, schema & tests
+    # Keep this exact name: the "main protection" ruleset requires a status
+    # check called "HA integration — syntax & schema". While the job carried
+    # another name that check never reported, so every PR stayed blocked.
+    name: HA integration — syntax & schema
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
