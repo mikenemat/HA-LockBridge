@@ -59,6 +59,16 @@ python3 -c "import json; json.load(open('manifest.json'))"
 python3 -c "import json; json.load(open('strings.json'))"
 ```
 
+Tests (from the repo root). Plain `pytest` covers the pure-logic tests; the ones
+that need a real Home Assistant core only run once a test rig is installed —
+Home Assistant's own `pytest-homeassistant`, on the Python version Home
+Assistant requires:
+
+```bash
+pip install pytest-homeassistant   # pulls in the matching homeassistant
+python -m pytest tests/ -v
+```
+
 ## Code style
 
 - **Swift:** Match the surrounding code. No formatter is enforced.

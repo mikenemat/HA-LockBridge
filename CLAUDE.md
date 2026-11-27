@@ -140,11 +140,17 @@ cp DevelopmentTeam.xcconfig.example DevelopmentTeam.xcconfig
 ./build.sh --toggle "Front Door"            # CLI test mode (no HTTP server)
 python3 Resources/generate_icon.py          # regenerate the app icon
 
-# HA integration validation (syntax + JSON only — actual entity behavior
-# requires a running HA)
+# HA integration validation (syntax + JSON only)
 cd custom_components/ha_lockbridge
 for f in *.py; do python3 -m py_compile "$f"; done
 python3 -c "import json; json.load(open('manifest.json'))"
+
+# HA integration tests (repo root). With only pytest installed this runs the
+# pure-logic tests; entity behavior inside a real HA core
+# (tests/test_device_registry.py) needs the rig: `pip install pytest-homeassistant`
+# on the Python version HA requires. CI's `ha-rig` job runs it against the
+# newest HA and the hacs.json minimum.
+python3 -m pytest tests/ -v
 ```
 
 ## Things to NOT do

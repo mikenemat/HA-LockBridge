@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity
@@ -99,6 +100,24 @@ class LockBridgeBaseEntity(Entity):
         """Always read from the client's live state dict."""
         return self._client.states.get(self._accessory_id, self._state)
 
+    def _hub_device_id(self) -> str | None:
+        """Device-registry id of the bridge ("hub") device, or None if it has none.
+
+        `__init__.py` registers the hub device before any platform is set up, so
+        the lookup normally succeeds. The link only groups locks under their
+        bridge in the UI, so if the hub device is somehow missing we drop the
+        link rather than raise: an exception here would stop the lock entity
+        from being added at all.
+        """
+        try:
+            return dr.async_get_device_id_by_identifier(
+                self.hass,
+                (DOMAIN, self._entry.entry_id),
+                config_entry_id=self._entry.entry_id,
+            )
+        except ValueError:
+            return None
+
     @property
     def device_info(self) -> DeviceInfo:
         acc = self.accessory
@@ -120,7 +139,11 @@ class LockBridgeBaseEntity(Entity):
             manufacturer=manufacturer,
             model=model,
             sw_version=sw_version,
-            via_device=(DOMAIN, self._entry.entry_id),
+            # `via_device_id` (HA 2026.8+) replaces the deprecated `via_device`.
+            # Never pass `via_device` again: core reports it, and when it
+            # re-adds an entity itself (an entity-ID rename in the UI) that
+            # report is raised as an error and the entity is lost.
+            via_device_id=self._hub_device_id(),
         )
 
     @property

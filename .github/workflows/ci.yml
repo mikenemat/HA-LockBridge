@@ -37,6 +37,38 @@ jobs:
         # broken test module fails CI instead of being silently skipped.
         run: python -m pytest tests/ -v
 
+  ha-rig:
+    # The job above runs on a bare interpreter, where the tests that need a
+    # real Home Assistant core (tests/test_device_registry.py and
+    # tests/test_integration.py) collect nothing. This job installs a Home
+    # Assistant test rig so they actually run.
+    name: HA test rig — ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Newest Home Assistant, on its own test package (exists for HA
+          # 2026.11 and newer; each release pins the matching homeassistant).
+          - name: latest Home Assistant
+            rig: pytest-homeassistant
+          # The oldest Home Assistant hacs.json allows. pytest-homeassistant
+          # doesn't go back that far; this release of its predecessor pins
+          # homeassistant==2026.8.0. Bump it together with hacs.json.
+          - name: minimum Home Assistant (2026.8.0)
+            rig: pytest-homeassistant-custom-component==0.13.354
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install the Home Assistant test rig
+        run: |
+          pip install "${{ matrix.rig }}"
+          python -c "from importlib.metadata import version; print('homeassistant', version('homeassistant'))"
+      - name: Run tests
+        run: python -m pytest tests/ -v
+
   hassfest:
     name: hassfest (Home Assistant manifest validation)
     runs-on: ubuntu-latest
